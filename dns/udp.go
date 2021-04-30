@@ -1,0 +1,117 @@
+package dns
+
+import (
+	"encoding/binary"
+	"errors"
+	"github.com/DeepAQ/mut/util"
+	"math/rand"
+	"net"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+	"unsafe"
+)
+
+var (
+	errMaxConcurrency = errors.New("too many concurrent requests")
+	errTimeout        = errors.New("dns request timed out")
+)
+
+type udpRequest struct {
+	buf  []byte
+	resc chan []byte
+}
+
+type udpClient struct {
+	server  string
+	conn    net.Conn
+	connMu  sync.Mutex
+	reqId   uint32
+	reqs    sync.Map //map[uint16]udpRequest
+	timeout time.Duration
+}
+
+func NewUDPClient(server string, timeout time.Duration) *udpClient {
+	if strings.IndexByte(server, ':') < 0 {
+		server += ":53"
+	}
+	return &udpClient{
+		server:  server,
+		conn:    nil,
+		reqId:   rand.Uint32(),
+		reqs:    sync.Map{},
+		timeout: timeout,
+	}
+}
+
+func (u *udpClient) RoundTrip(req []byte) ([]byte, error) {
+	if atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&u.conn))) == nil {
+		u.connMu.Lock()
+		if u.conn == nil {
+			conn, err := net.Dial("udp", u.server)
+			if err != nil {
+				u.connMu.Unlock()
+				return nil, err
+			}
+			u.conn = conn
+			go u.readLoop()
+		}
+		u.connMu.Unlock()
+	}
+
+	resc := make(chan []byte)
+	ur := udpRequest{
+		buf:  req,
+		resc: resc,
+	}
+	var reqId uint16
+	for i := 0; ; i++ {
+		reqId = uint16(atomic.AddUint32(&u.reqId, 1) & (1<<16 - 1))
+		if _, exists := u.reqs.LoadOrStore(reqId, ur); !exists {
+			break
+		}
+		if i >= 1<<16-1 {
+			return nil, errMaxConcurrency
+		}
+	}
+
+	defer func() {
+		u.reqs.Delete(reqId)
+		close(resc)
+	}()
+	binary.BigEndian.PutUint16(req[:2], reqId)
+	if _, err := u.conn.Write(req); err != nil {
+		return nil, err
+	}
+	timeOut := time.NewTimer(u.timeout)
+	select {
+	case result := <-resc:
+		timeOut.Stop()
+		return result, nil
+	case <-timeOut.C:
+		return nil, errTimeout
+	}
+}
+
+func (u *udpClient) readLoop() {
+	buf := util.BufPool.Get(udpPacketSize)
+	defer util.BufPool.Put(buf)
+
+	for {
+		u.conn.SetDeadline(time.Now().Add(60 * time.Second))
+		n, err := u.conn.Read(buf)
+		if err != nil {
+			u.conn.Close()
+			atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&u.conn)), nil)
+			return
+		}
+		reqId := binary.BigEndian.Uint16(buf[:2])
+		if v, ok := u.reqs.Load(reqId); ok {
+			ur := v.(udpRequest)
+			ur.buf = ur.buf[:n]
+			copy(ur.buf, buf)
+			ur.resc <- ur.buf
+		}
+	}
+}
