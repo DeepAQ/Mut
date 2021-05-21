@@ -2,8 +2,10 @@ package outbound
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
+	"github.com/DeepAQ/mut/config"
 	"github.com/DeepAQ/mut/util"
 	"io"
 	"math/rand"
@@ -72,6 +74,15 @@ func Http2(u *url.URL) (*h2Outbound, error) {
 		tMutex:    make([]sync.Mutex, concurrency),
 		tDeadline: make([]time.Time, concurrency),
 	}
+	if config.TlsCertVerifier != nil {
+		h.tlsConfig.InsecureSkipVerify = true
+		h.tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if !config.TlsCertVerifier(serverName, rawCerts) {
+				return errCertNotTrusted
+			}
+			return nil
+		}
+	}
 	return h, nil
 }
 
@@ -88,6 +99,7 @@ func (h *h2Outbound) DialTcp(targetAddr string) (net.Conn, error) {
 		return nil, err
 	}
 	req.Host = targetAddr
+	req.Header.Set("User-Agent", "")
 	if h.needsAuth {
 		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(h.username+":"+h.password)))
 	}
@@ -134,7 +146,7 @@ func (h *h2Outbound) getRandomTransport() *http.Transport {
 				TLSClientConfig:     h.tlsConfig,
 				ForceAttemptHTTP2:   true,
 				MaxIdleConns:        100,
-				IdleConnTimeout:     1 * time.Minute,
+				IdleConnTimeout:     config.TcpStreamTimeout,
 				TLSHandshakeTimeout: 10 * time.Second,
 			}
 			if h.aliveTime > 0 {

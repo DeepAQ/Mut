@@ -59,7 +59,7 @@ func NewCustomResolver(bufSize int, client Client) *customResolver {
 	return r
 }
 
-func (r *customResolver) Start(ctx context.Context) {
+func (r *customResolver) OnMutStart(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
 		for {

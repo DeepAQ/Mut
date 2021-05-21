@@ -2,8 +2,15 @@ package outbound
 
 import (
 	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"github.com/DeepAQ/mut/config"
 	"net"
 	"net/url"
+)
+
+var (
+	errCertNotTrusted = errors.New("server certificate is not trusted")
 )
 
 type httpsOutbound struct {
@@ -36,11 +43,21 @@ func (h *httpsOutbound) DialTcp(targetAddr string) (net.Conn, error) {
 		return nil, err
 	}
 
-	tlsConn := tls.Client(conn, &tls.Config{
+	tlsConfig := &tls.Config{
 		ServerName: h.serverName,
 		NextProtos: []string{"http/1.1"},
 		MinVersion: tls.VersionTLS12,
-	})
+	}
+	if config.TlsCertVerifier != nil {
+		tlsConfig.InsecureSkipVerify = true
+		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if !config.TlsCertVerifier(h.serverName, rawCerts) {
+				return errCertNotTrusted
+			}
+			return nil
+		}
+	}
+	tlsConn := tls.Client(conn, tlsConfig)
 	if err := tlsConn.Handshake(); err != nil {
 		return nil, err
 	}

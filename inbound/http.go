@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"encoding/base64"
+	"github.com/DeepAQ/mut/config"
 	"github.com/DeepAQ/mut/router"
 	"github.com/DeepAQ/mut/util"
 	"io"
@@ -41,7 +42,7 @@ func Http(u *url.URL, rt router.Router) (*httpInbound, error) {
 			DisableKeepAlives:     false,
 			DisableCompression:    false,
 			MaxIdleConns:          100,
-			IdleConnTimeout:       1 * time.Minute,
+			IdleConnTimeout:       config.TcpStreamTimeout,
 			ExpectContinueTimeout: 1 * time.Second,
 		},
 	}, nil
@@ -83,14 +84,14 @@ func (h *httpInbound) ServeConn(conn net.Conn, handleTcpStream StreamHandler) er
 							Conn:       hConn,
 							Protocol:   "https",
 							ClientAddr: req.RemoteAddr,
-							TargetAddr: req.RequestURI,
+							TargetAddr: req.URL.Host,
 						})
 					} else {
 						handleTcpStream(&TcpStream{
 							Conn:       hConn,
 							Protocol:   "http",
 							ClientAddr: req.RemoteAddr,
-							TargetAddr: req.RequestURI,
+							TargetAddr: req.URL.Host,
 						})
 					}
 
@@ -142,7 +143,7 @@ func (h *httpInbound) ServeConn(conn net.Conn, handleTcpStream StreamHandler) er
 				}
 
 				resp.WriteHeader(result.StatusCode)
-				buf := util.BufPool.Get(4 * 1024)
+				buf := util.BufPool.Get(config.ConnBufSize)
 				io.CopyBuffer(resp, result.Body, buf)
 				util.BufPool.Put(buf)
 			}
@@ -187,4 +188,35 @@ func (h *h2ConnWrapper) Write(p []byte) (n int, err error) {
 
 func (h *h2ConnWrapper) Close() error {
 	return h.req.Body.Close()
+}
+
+func (h *h2ConnWrapper) LocalAddr() net.Addr {
+	return h2Addr{}
+}
+
+func (h *h2ConnWrapper) RemoteAddr() net.Addr {
+	return h2Addr{}
+}
+
+func (h *h2ConnWrapper) SetDeadline(_ time.Time) error {
+	return nil
+}
+
+func (h *h2ConnWrapper) SetReadDeadline(_ time.Time) error {
+	return nil
+}
+
+func (h *h2ConnWrapper) SetWriteDeadline(_ time.Time) error {
+	return nil
+}
+
+type h2Addr struct {
+}
+
+func (h h2Addr) Network() string {
+	return "tcp"
+}
+
+func (h h2Addr) String() string {
+	return "h2-stream"
 }

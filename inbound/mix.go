@@ -1,6 +1,7 @@
 package inbound
 
 import (
+	"context"
 	"errors"
 	"github.com/DeepAQ/mut/router"
 	"github.com/DeepAQ/mut/util"
@@ -27,7 +28,7 @@ func Mix(u *url.URL, rt router.Router) (*mixInbound, error) {
 	if err != nil {
 		return nil, err
 	}
-	s, err := Socks(u)
+	s, err := Socks(u, rt)
 	if err != nil {
 		return nil, err
 	}
@@ -35,6 +36,10 @@ func Mix(u *url.URL, rt router.Router) (*mixInbound, error) {
 		http:  h,
 		socks: s,
 	}, nil
+}
+
+func (m *mixInbound) OnMutStart(ctx context.Context) {
+	m.socks.OnMutStart(ctx)
 }
 
 func (m *mixInbound) Name() string {

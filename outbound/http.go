@@ -45,6 +45,7 @@ func (h *httpOutbound) dialTcpWithConn(conn net.Conn, targetAddr string) (net.Co
 		return nil, err
 	}
 	req.Host = targetAddr
+	req.Header.Set("User-Agent", "")
 	if h.needsAuth {
 		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(h.username+":"+h.password)))
 	}

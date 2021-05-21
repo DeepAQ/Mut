@@ -2,7 +2,12 @@ package inbound
 
 import (
 	"bufio"
+	"context"
+	"encoding/binary"
 	"errors"
+	"github.com/DeepAQ/mut/config"
+	"github.com/DeepAQ/mut/router"
+	"github.com/DeepAQ/mut/util"
 	"io"
 	"net"
 	"net/url"
@@ -13,25 +18,46 @@ import (
 var (
 	errAuthTooLong      = errors.New("username or password too long")
 	errAuthNotSupported = errors.New("client does not support password auth")
+	errAuthFailed       = errors.New("incorrect username or password")
 )
 
 type socksInbound struct {
-	needsAuth bool
-	username  string
-	password  string
+	router     router.Router
+	addr       string
+	needsAuth  bool
+	username   string
+	password   string
+	udpEnabled bool
+	udpConn    net.PacketConn
 }
 
-func Socks(u *url.URL) (*socksInbound, error) {
+func Socks(u *url.URL, rt router.Router) (*socksInbound, error) {
 	username := u.User.Username()
 	password, _ := u.User.Password()
 	if len(username) > 255 || len(password) > 255 {
 		return nil, errAuthTooLong
 	}
-	return &socksInbound{
+	s := &socksInbound{
+		router:    rt,
+		addr:      u.Host,
 		needsAuth: len(username) > 0 && len(password) > 0,
 		username:  username,
 		password:  password,
-	}, nil
+	}
+	if u.Query().Get("udp") == "1" {
+		if !s.needsAuth {
+			s.udpEnabled = true
+		} else {
+			util.Stdout.Println("[socks] udp with auth is not supported yet")
+		}
+	}
+	return s, nil
+}
+
+func (s *socksInbound) OnMutStart(ctx context.Context) {
+	if s.udpEnabled {
+		s.startUdpGw(ctx)
+	}
 }
 
 func (s *socksInbound) Name() string {
@@ -85,7 +111,7 @@ func (s *socksInbound) ServeConn(conn net.Conn, handleTcpStream StreamHandler) e
 		}
 		if username != s.username || password != s.password {
 			conn.Write([]byte{0x01, 0x01})
-			return errors.New("incorrect username or password")
+			return errAuthFailed
 		}
 		if _, err := conn.Write([]byte{0x01, 0x00}); err != nil {
 			return err
@@ -146,6 +172,93 @@ func (s *socksInbound) ServeConn(conn net.Conn, handleTcpStream StreamHandler) e
 		TargetAddr: addrAndPort,
 	})
 	return nil
+}
+
+func (s *socksInbound) startUdpGw(ctx context.Context) {
+	var err error
+	s.udpConn, err = net.ListenPacket("udp", s.addr)
+	if err != nil {
+		util.Stderr.Println("[socks-udp] failed to listen on " + s.addr + ": " + err.Error())
+		return
+	}
+	util.Stdout.Println("[socks-udp] listening on " + s.addr)
+
+	cancelCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		select {
+		case <-cancelCtx.Done():
+			s.udpConn.Close()
+		}
+		util.Stdout.Println("[socks-udp] udp listener stopped")
+	}()
+
+	go func() {
+		buf := util.BufPool.Get(config.UdpMaxLength)
+		defer util.BufPool.Put(buf)
+
+		for {
+			n, cAddr, err := s.udpConn.ReadFrom(buf)
+			if err != nil {
+				if !errors.Is(err, net.ErrClosed) {
+					util.Stderr.Println("[socks-udp] failed to read request: " + err.Error())
+				}
+				cancel()
+				return
+			}
+
+			if n <= 8 || (buf[0]|buf[1]|buf[2]) != 0 {
+				continue
+			}
+			var off int
+			var addrAndPort string
+			switch buf[3] {
+			case 0x01:
+				if n <= 10 {
+					continue
+				}
+				addrAndPort = net.IP(buf[4:8]).String() + ":" + strconv.Itoa(int(buf[8])<<8+int(buf[9]))
+				off = 10
+			case 0x04:
+				if n <= 22 {
+					continue
+				}
+				addrAndPort = "[" + net.IP(buf[4:20]).String() + "]:" + strconv.Itoa(int(buf[20])<<8+int(buf[21]))
+				off = 22
+			case 0x03:
+				l := buf[4]
+				if n <= int(l)+7 {
+					continue
+				}
+				addrAndPort = string(buf[5:5+l]) + ":" + strconv.Itoa(int(buf[5+l])<<8+int(buf[6+l]))
+				off = int(l) + 7
+			default:
+				continue
+			}
+
+			s.router.SendUdpPacket(s, cAddr, addrAndPort, buf[off:n])
+		}
+	}()
+}
+
+func (s *socksInbound) ReplyUdpPacket(clientAddr, remoteAddr net.Addr, data []byte) error {
+	buf := util.BufPool.Get(len(data) + 10)
+	defer util.BufPool.Put(buf)
+
+	buf[0] = 0
+	buf[1] = 0
+	buf[2] = 0
+	buf[3] = 0x01
+	rAddr := remoteAddr.(*net.UDPAddr)
+	ip4 := rAddr.IP.To4()
+	if ip4 == nil {
+		return nil
+	}
+	copy(buf[4:8], ip4)
+	binary.BigEndian.PutUint16(buf[8:10], uint16(rAddr.Port))
+	copy(buf[10:], data)
+
+	_, err := s.udpConn.WriteTo(buf, clientAddr)
+	return err
 }
 
 func readLengthAndString(r *bufio.Reader, minLength, maxLength byte) (string, error) {

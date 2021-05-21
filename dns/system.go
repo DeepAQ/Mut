@@ -1,7 +1,6 @@
 package dns
 
 import (
-	"context"
 	"net"
 )
 
@@ -9,9 +8,6 @@ type systemResolver struct {
 }
 
 var System = systemResolver{}
-
-func (systemResolver) Start(_ context.Context) {
-}
 
 func (systemResolver) ResolveFakeIP(net.IP) string {
 	return ""

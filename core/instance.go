@@ -6,17 +6,28 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/DeepAQ/mut/config"
 	"github.com/DeepAQ/mut/debug"
 	"github.com/DeepAQ/mut/dns"
 	"github.com/DeepAQ/mut/inbound"
 	"github.com/DeepAQ/mut/outbound"
 	"github.com/DeepAQ/mut/router"
 	"github.com/DeepAQ/mut/util"
-	"io"
 	"net"
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
+	"time"
+)
+
+var (
+	stdinFlag = flag.Bool("stdin", false, "receive other arguments from stdin")
+	inFlag    = flag.String("in", "", "inbound config, protocol://[username:password@]host:port[/?option=value...]")
+	outFlag   = flag.String("out", "", "outbound config, protocol://[username:password@]host:port[/?option=value...]")
+	dnsFlag   = flag.String("dns", "", "dns config, protocol://host:port[/path...]")
+	rulesFlag = flag.String("rules", "", "router rules, rule1:action1[;rule2:action2...][;final:action]")
+	debugFlag = flag.Int("debug", 0, "localhost debug port")
 )
 
 type Instance interface {
@@ -37,12 +48,7 @@ type instance struct {
 }
 
 func createInstance(args []string) (*instance, error) {
-	stdinFlag := flag.Bool("stdin", false, "receive other arguments from stdin")
-	inFlag := flag.String("in", "", "inbound config, protocol://[username:password@]host:port[/?option=value...]")
-	outFlag := flag.String("out", "", "outbound config, protocol://[username:password@]host:port[/?option=value...]")
-	dnsFlag := flag.String("dns", "", "dns config, protocol://host:port[/path...]")
-	rulesFlag := flag.String("rules", "", "router rules, rule1:action1[;rule2:action2...][;final:action]")
-	debugFlag := flag.Int("debug", 0, "localhost debug port")
+	fmt.Println("Mut [Multi-usage tunnel], a DeepAQ Labs project")
 	flag.CommandLine.Parse(args)
 	if *stdinFlag {
 		fmt.Println("Receiving arguments from stdin")
@@ -111,7 +117,8 @@ func (i *instance) Run() {
 	if i.debugPort > 0 {
 		debug.StartDebugServer(i.ctx, i.debugPort)
 	}
-	i.resolver.Start(i.ctx)
+	i.callStartListener(i.inbound)
+	i.callStartListener(i.resolver)
 
 	listener, err := net.Listen("tcp", i.inAddr)
 	if err != nil {
@@ -141,6 +148,14 @@ func (i *instance) Run() {
 
 		go func() {
 			err := i.inbound.ServeConn(conn, func(stream *inbound.TcpStream) {
+				if config.FreeMemoryInterval > 0 {
+					now := time.Now().Unix()
+					last := atomic.LoadInt64(&config.LastMemoryFree)
+					if int(now-last) >= config.FreeMemoryInterval && atomic.CompareAndSwapInt64(&config.LastMemoryFree, last, now) {
+						FreeOSMemory()
+					}
+				}
+
 				dConn, err, outName, realAddr := i.router.DialTcp(stream.TargetAddr)
 				if err != nil {
 					stream.Conn.Close()
@@ -161,10 +176,28 @@ func (i *instance) Run() {
 	}
 }
 
-func relay(src io.ReadCloser, dst io.WriteCloser) {
+func (i *instance) callStartListener(v interface{}) {
+	if l, ok := v.(StartListener); ok {
+		l.OnMutStart(i.ctx)
+	}
+}
+
+func relay(src, dst net.Conn) {
 	defer src.Close()
 	defer dst.Close()
-	buf := util.BufPool.Get(4 * 1024)
+	buf := util.BufPool.Get(config.ConnBufSize)
 	defer util.BufPool.Put(buf)
-	io.CopyBuffer(dst, src, buf)
+
+	for {
+		src.SetDeadline(time.Now().Add(config.TcpStreamTimeout))
+		nr, err := src.Read(buf)
+		if err != nil {
+			return
+		}
+
+		dst.SetDeadline(time.Now().Add(config.TcpStreamTimeout))
+		if nw, err := dst.Write(buf[:nr]); nw < nr || err != nil {
+			return
+		}
+	}
 }

@@ -7,7 +7,7 @@ import (
 var BufPool *bufPool
 
 func init() {
-	BufPool = newBufPool(64, 65536)
+	BufPool = NewBufPool(64, 65536)
 }
 
 type bufPool struct {
@@ -16,7 +16,7 @@ type bufPool struct {
 	bufs   []sync.Pool
 }
 
-func newBufPool(minSize, maxSize int) *bufPool {
+func NewBufPool(minSize, maxSize uint32) *bufPool {
 	minExp := log2(minSize)
 	maxExp := log2(maxSize)
 	bp := &bufPool{
@@ -33,12 +33,18 @@ func newBufPool(minSize, maxSize int) *bufPool {
 	return bp
 }
 
-func log2(x int) int {
-	result := 0
-	for x > 1 {
-		x >>= 1
-		result += 1
+func log2(x uint32) int {
+	var multiplyDeBruijnBitPosition = [32]int{
+		0, 9, 1, 10, 13, 21, 2, 29, 11, 14, 16, 18, 22, 25, 3, 30,
+		8, 12, 20, 28, 15, 17, 24, 7, 19, 27, 23, 6, 26, 5, 4, 31,
 	}
+	v := x
+	v |= v >> 1
+	v |= v >> 2
+	v |= v >> 4
+	v |= v >> 8
+	v |= v >> 16
+	result := multiplyDeBruijnBitPosition[(v*0x07c4acdd)>>27]
 
 	if x <= (1 << result) {
 		return result
@@ -48,7 +54,7 @@ func log2(x int) int {
 }
 
 func (bp *bufPool) Get(size int) []byte {
-	exp := log2(size)
+	exp := log2(uint32(size))
 	if exp > bp.maxExp {
 		return make([]byte, size)
 	}
@@ -60,7 +66,7 @@ func (bp *bufPool) Get(size int) []byte {
 }
 
 func (bp *bufPool) Put(b []byte) {
-	exp := log2(cap(b))
+	exp := log2(uint32(cap(b)))
 	if exp > bp.maxExp || exp < bp.minExp || cap(b) != (1<<exp) {
 		return
 	}

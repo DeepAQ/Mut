@@ -20,7 +20,7 @@ func NewDoHClient(server string, timeout time.Duration) *dohClient {
 				ForceAttemptHTTP2:   true,
 				MaxIdleConns:        100,
 				IdleConnTimeout:     1 * time.Minute,
-				TLSHandshakeTimeout: 10 * time.Second,
+				TLSHandshakeTimeout: timeout,
 			},
 			Timeout: timeout,
 		},
@@ -34,6 +34,7 @@ func (d *dohClient) RoundTrip(req []byte) ([]byte, error) {
 	}
 	hReq.Header.Set("Accept", "application/dns-message")
 	hReq.Header.Set("Content-Type", "application/dns-message")
+	hReq.Header.Set("User-Agent", "")
 
 	hResp, err := d.client.Do(hReq)
 	if err != nil {

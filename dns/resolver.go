@@ -1,7 +1,6 @@
 package dns
 
 import (
-	"context"
 	"errors"
 	"net"
 	"net/url"
@@ -10,12 +9,11 @@ import (
 )
 
 const (
-	udpPacketSize = 512
-	dohPacketSize = 1024
+	udpPacketSize = 1024
+	dohPacketSize = 2048
 )
 
 type Resolver interface {
-	Start(ctx context.Context)
 	ResolveFakeIP(ip net.IP) string
 	Lookup(host string) (net.IP, error)
 	Debug() string

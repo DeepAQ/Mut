@@ -3,11 +3,19 @@ package inbound
 import (
 	"errors"
 	"github.com/DeepAQ/mut/router"
-	"io"
 	"net"
 	"net/url"
 	"sync/atomic"
 )
+
+type TcpStream struct {
+	Conn       net.Conn
+	Protocol   string
+	ClientAddr string
+	TargetAddr string
+}
+
+type StreamHandler func(*TcpStream)
 
 type Inbound interface {
 	Name() string
@@ -21,7 +29,7 @@ func CreateInbound(u *url.URL, rt router.Router) (Inbound, error) {
 	case "https", "h2":
 		return Https(u, rt)
 	case "socks", "socks5":
-		return Socks(u)
+		return Socks(u, rt)
 	case "mix":
 		return Mix(u, rt)
 	case "forward":
@@ -30,15 +38,6 @@ func CreateInbound(u *url.URL, rt router.Router) (Inbound, error) {
 		return nil, errors.New("unsupported inbound type " + u.Scheme)
 	}
 }
-
-type TcpStream struct {
-	Conn       io.ReadWriteCloser
-	Protocol   string
-	ClientAddr string
-	TargetAddr string
-}
-
-type StreamHandler func(*TcpStream)
 
 type connListener struct {
 	conn     net.Conn
