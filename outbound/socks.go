@@ -2,7 +2,8 @@ package outbound
 
 import (
 	"errors"
-	"github.com/DeepAQ/mut/util"
+	"github.com/DeepAQ/mut/global"
+	"github.com/DeepAQ/mut/transport"
 	"io"
 	"net"
 	"net/url"
@@ -17,20 +18,25 @@ var (
 )
 
 type socksOutbound struct {
-	host      string
+	transport transport.TcpOutboundTransport
 	needsAuth bool
 	username  string
 	password  string
 }
 
-func Socks(u *url.URL) (*socksOutbound, error) {
+func NewSocksOutbound(u *url.URL, tp transport.OutboundTransport) (*socksOutbound, error) {
+	tcpTransport, err := transport.RequireTcpOutboundTransport(u, tp)
+	if err != nil {
+		return nil, err
+	}
+
 	username := u.User.Username()
 	password, _ := u.User.Password()
 	if len(username) > 255 || len(password) > 255 {
 		return nil, errAuthTooLong
 	}
 	return &socksOutbound{
-		host:      u.Host,
+		transport: tcpTransport,
 		needsAuth: len(username) > 0 && len(password) > 0,
 		username:  username,
 		password:  password,
@@ -53,7 +59,7 @@ func (s *socksOutbound) DialTcp(targetAddr string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, err := net.Dial("tcp", s.host)
+	conn, err := s.transport.OpenConnection()
 	if err != nil {
 		return nil, err
 	}
@@ -66,8 +72,8 @@ func (s *socksOutbound) DialTcp(targetAddr string) (net.Conn, error) {
 	if bufSize < 32 {
 		bufSize = 32
 	}
-	buf := util.BufPool.Get(bufSize)
-	defer util.BufPool.Put(buf)
+	buf := global.BufPool.Get(bufSize)
+	defer global.BufPool.Put(buf)
 
 	// client greeting
 	buf = append(buf[:0], 0x05)
@@ -172,9 +178,9 @@ func (s *socksOutbound) DialTcp(targetAddr string) (net.Conn, error) {
 		if cap(buf) >= int(buf[0])+2 {
 			_, err = io.ReadFull(conn, buf[:buf[0]+2])
 		} else {
-			buf2 := util.BufPool.Get(int(buf[0]) + 2)
+			buf2 := global.BufPool.Get(int(buf[0]) + 2)
 			_, err = io.ReadFull(conn, buf2[:buf[0]+2])
-			util.BufPool.Put(buf2)
+			global.BufPool.Put(buf2)
 		}
 	}
 	if err != nil {

@@ -1,9 +1,9 @@
 package dns
 
 import (
-	"context"
+	"encoding/binary"
 	"errors"
-	"github.com/DeepAQ/mut/util"
+	"github.com/DeepAQ/mut/global"
 	"golang.org/x/net/dns/dnsmessage"
 	"math/rand"
 	"net"
@@ -59,14 +59,11 @@ func NewCustomResolver(bufSize int, client Client) *customResolver {
 	return r
 }
 
-func (r *customResolver) OnMutStart(ctx context.Context) {
+func (r *customResolver) Start() {
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
 		for {
 			select {
-			case <-ctx.Done():
-				ticker.Stop()
-				return
 			case <-ticker.C:
 				now := time.Now()
 				r.cache.Range(func(k, v interface{}) bool {
@@ -92,15 +89,14 @@ func (r *customResolver) OnMutStart(ctx context.Context) {
 	}()
 
 	if len(r.localAddr) > 0 {
-		r.listenLocal(ctx)
+		r.listenLocal()
 	}
 }
 
 func (r *customResolver) ResolveFakeIP(ip net.IP) string {
 	if r.fakeIpPrefix > 0 {
-		ip4 := ip.To4()
-		if ip4 != nil {
-			ipInt := uint32(ip4[0])<<24 + uint32(ip4[1])<<16 + uint32(ip4[2])<<8 + uint32(ip4[3])
+		if ip4 := ip.To4(); ip4 != nil {
+			ipInt := binary.BigEndian.Uint32(ip4)
 			if ipInt & ^((1<<(32-r.fakeIpMask))-1) == r.fakeIpPrefix {
 				r.fakeIpMu.Lock()
 				defer r.fakeIpMu.Unlock()
@@ -130,8 +126,8 @@ func (r *customResolver) Lookup(host string) (net.IP, error) {
 		}
 	}
 
-	buf := util.BufPool.Get(r.bufSize)
-	defer util.BufPool.Put(buf)
+	buf := global.BufPool.Get(r.bufSize)
+	defer global.BufPool.Put(buf)
 	buf, err := queryToWire(buf, host, dnsmessage.TypeA)
 	if err != nil {
 		return nil, err
@@ -190,13 +186,13 @@ func (r *customResolver) Debug() string {
 	return sb.String()
 }
 
-func (r *customResolver) listenLocal(ctx context.Context) {
+func (r *customResolver) listenLocal() {
 	conn, err := net.ListenPacket("udp", r.localAddr)
 	if err != nil {
-		util.Stderr.Println("[dns-local] failed to listen on " + r.localAddr + ": " + err.Error())
+		global.Stderr.Println("[dns-local] failed to listen on " + r.localAddr + ": " + err.Error())
 		return
 	}
-	util.Stdout.Println("[dns-local] listening on " + r.localAddr)
+	global.Stdout.Println("[dns-local] listening on " + r.localAddr)
 	if r.useFakeIp {
 		// temp: use 198.18.0.0/16 as fake ip range
 		r.fakeIpPrefix = 198<<24 + 18<<16
@@ -205,29 +201,17 @@ func (r *customResolver) listenLocal(ctx context.Context) {
 		r.hostToFakeIp = map[string]uint32{}
 	}
 
-	cancelCtx, cancel := context.WithCancel(ctx)
 	go func() {
-		select {
-		case <-cancelCtx.Done():
-			conn.Close()
-		}
-		util.Stdout.Println("[dns-local] local server stopped")
-	}()
-
-	go func() {
-		reqBuf := util.BufPool.Get(r.bufSize)
-		defer util.BufPool.Put(reqBuf)
-		respBuf := util.BufPool.Get(udpPacketSize)
-		defer util.BufPool.Put(respBuf)
+		reqBuf := global.BufPool.Get(r.bufSize)
+		defer global.BufPool.Put(reqBuf)
+		respBuf := global.BufPool.Get(udpPacketSize)
+		defer global.BufPool.Put(respBuf)
 		parser := dnsmessage.Parser{}
 
 		for {
 			n, rAddr, err := conn.ReadFrom(reqBuf)
 			if err != nil {
-				if !errors.Is(err, net.ErrClosed) {
-					util.Stderr.Println("[dns-local] failed to read request: " + err.Error())
-				}
-				cancel()
+				global.Stderr.Println("[dns-local] failed to read request: " + err.Error())
 				return
 			}
 
@@ -235,14 +219,14 @@ func (r *customResolver) listenLocal(ctx context.Context) {
 			if r.fakeIpPrefix > 0 {
 				reqHeader, err := parser.Start(reqBuf[:n])
 				if err != nil {
-					util.Stderr.Println("[dns-local] failed to parse request: " + err.Error())
+					global.Stderr.Println("[dns-local] failed to parse request: " + err.Error())
 					resp = writeServFail(reqBuf)
 					goto sendResponse
 				}
 				if reqHeader.OpCode == 0 {
 					reqQuestion, err := parser.Question()
 					if err != nil {
-						util.Stderr.Println("[dns-local] failed to parse request question: " + err.Error())
+						global.Stderr.Println("[dns-local] failed to parse request question: " + err.Error())
 						resp = writeServFail(reqBuf)
 						goto sendResponse
 					}
@@ -258,7 +242,7 @@ func (r *customResolver) listenLocal(ctx context.Context) {
 									break
 								}
 								if i >= 1<<(32-r.fakeIpMask)-1 {
-									util.Stderr.Println("[dns-local] no available addresses in fake ip pool")
+									global.Stderr.Println("[dns-local] no available addresses in fake ip pool")
 									resp = writeServFail(reqBuf)
 									goto sendResponse
 								}
@@ -272,7 +256,7 @@ func (r *customResolver) listenLocal(ctx context.Context) {
 						r.fakeIpMu.Unlock()
 						resp, err = ipv4AnswerToWire(reqHeader, reqQuestion, fip, fakeIpTTL, respBuf)
 						if err != nil {
-							util.Stderr.Println("[dns-local] failed to build response: " + err.Error())
+							global.Stderr.Println("[dns-local] failed to build response: " + err.Error())
 							resp = writeServFail(reqBuf)
 						}
 						goto sendResponse
@@ -282,19 +266,19 @@ func (r *customResolver) listenLocal(ctx context.Context) {
 
 			resp, err = r.client.RoundTrip(reqBuf[:n])
 			if err != nil {
-				util.Stderr.Println("[dns-local] failed to resolve: " + err.Error())
+				global.Stderr.Println("[dns-local] failed to resolve: " + err.Error())
 				resp = writeServFail(reqBuf)
 			} else {
 				resp, err = compressMessage(resp, respBuf)
 				if err != nil {
-					util.Stderr.Println("[dns-local] failed to build response: " + err.Error())
+					global.Stderr.Println("[dns-local] failed to build response: " + err.Error())
 					resp = writeServFail(reqBuf)
 				}
 			}
 
 		sendResponse:
 			if _, err := conn.WriteTo(resp, rAddr); err != nil {
-				util.Stderr.Println("[dns-local] failed to write response: " + err.Error())
+				global.Stderr.Println("[dns-local] failed to write response: " + err.Error())
 			}
 		}
 	}()

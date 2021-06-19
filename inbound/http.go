@@ -1,158 +1,159 @@
 package inbound
 
 import (
+	"crypto/tls"
 	"encoding/base64"
-	"github.com/DeepAQ/mut/config"
+	"github.com/DeepAQ/mut/global"
 	"github.com/DeepAQ/mut/router"
-	"github.com/DeepAQ/mut/util"
+	"github.com/DeepAQ/mut/transport"
+	"golang.org/x/net/http2"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 )
 
-type httpInbound struct {
+type httpProtocol struct {
 	httpsMode bool
 	needsAuth bool
 	username  string
 	password  string
+	initOnce  sync.Once
+	router    router.Router
+	server    *http.Server
 	transport *http.Transport
 }
 
-func Http(u *url.URL, rt router.Router) (*httpInbound, error) {
+func NewHttpProtocol(u *url.URL) *httpProtocol {
 	username := u.User.Username()
 	password, _ := u.User.Password()
-	return &httpInbound{
+	h := &httpProtocol{
 		httpsMode: false,
 		needsAuth: len(username) > 0 && len(password) > 0,
 		username:  username,
 		password:  password,
-		transport: &http.Transport{
-			Dial: func(network, addr string) (net.Conn, error) {
-				conn, err, outName, realAddr := rt.DialTcp(addr)
-				if err != nil {
-					return nil, err
-				}
-				util.Stdout.Println("[http] " + conn.LocalAddr().String() + " <-" + outName + "-> " + realAddr)
-				return conn, nil
-			},
-			DisableKeepAlives:     false,
-			DisableCompression:    false,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       config.TcpStreamTimeout,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
-	}, nil
-}
-
-func (h *httpInbound) Name() string {
-	return "http"
-}
-
-func (h *httpInbound) ServeConn(conn net.Conn, handleTcpStream StreamHandler) error {
-	err := http.Serve(&connListener{conn: conn}, http.HandlerFunc(
-		func(resp http.ResponseWriter, req *http.Request) {
-			if h.needsAuth {
-				username, password := proxyBasicAuth(req)
-				if username != h.username || password != h.password {
-					resp.Header().Set("Connection", "close")
-					resp.WriteHeader(http.StatusForbidden)
-					return
-				}
-			}
-
-			switch req.Method {
-			case http.MethodConnect:
-				switch req.ProtoMajor {
-				case 1:
-					hConn, _, err := resp.(http.Hijacker).Hijack()
-					if err != nil {
-						resp.Header().Set("Connection", "close")
-						resp.WriteHeader(http.StatusInternalServerError)
-						return
-					}
-					if _, err := hConn.Write([]byte("HTTP/1.1 200 OK\r\n\r\n")); err != nil {
-						hConn.Close()
-						return
-					}
-
-					if h.httpsMode {
-						handleTcpStream(&TcpStream{
-							Conn:       hConn,
-							Protocol:   "https",
-							ClientAddr: req.RemoteAddr,
-							TargetAddr: req.URL.Host,
-						})
-					} else {
-						handleTcpStream(&TcpStream{
-							Conn:       hConn,
-							Protocol:   "http",
-							ClientAddr: req.RemoteAddr,
-							TargetAddr: req.URL.Host,
-						})
-					}
-
-				case 2:
-					resp.WriteHeader(http.StatusOK)
-					resp.(http.Flusher).Flush()
-					handleTcpStream(&TcpStream{
-						Conn: &h2ConnWrapper{
-							req:  req,
-							resp: resp,
-						},
-						Protocol:   "h2",
-						ClientAddr: req.RemoteAddr,
-						TargetAddr: req.RequestURI,
-					})
-
-				default:
-					resp.Header().Set("Connection", "close")
-					resp.WriteHeader(http.StatusBadRequest)
-					return
-				}
-
-			default:
-				if req.URL.Scheme != "http" {
-					if h.httpsMode {
-						req.URL.Scheme = "http"
-						req.URL.Host = req.Host
-					} else {
-						resp.WriteHeader(http.StatusForbidden)
-						return
-					}
-				}
-
-				util.Stdout.Println("[http] " + req.RemoteAddr + " -> " + req.URL.String())
-				for header := range req.Header {
-					if strings.HasPrefix(strings.ToLower(header), "proxy-") {
-						req.Header.Del(header)
-					}
-				}
-				result, err := h.transport.RoundTrip(req)
-				if err != nil {
-					resp.WriteHeader(http.StatusInternalServerError)
-					return
-				}
-				for k, vs := range result.Header {
-					for _, v := range vs {
-						resp.Header().Add(k, v)
-					}
-				}
-
-				resp.WriteHeader(result.StatusCode)
-				buf := util.BufPool.Get(config.ConnBufSize)
-				io.CopyBuffer(resp, result.Body, buf)
-				util.BufPool.Put(buf)
-			}
-		}))
-
-	if err != nil && err != net.ErrClosed {
-		return err
 	}
-	return nil
+	h.server = &http.Server{
+		Handler:      h,
+		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
+	}
+	h.transport = &http.Transport{
+		DisableKeepAlives:     false,
+		DisableCompression:    false,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       global.TcpStreamTimeout,
+		ExpectContinueTimeout: 1 * time.Second,
+		Dial: func(network, addr string) (net.Conn, error) {
+			conn, err, outName, realAddr := h.router.DialTcp(addr)
+			if err != nil {
+				return nil, err
+			}
+			global.Stdout.Println("[http] " + conn.LocalAddr().String() + " <-" + outName + "-> " + realAddr)
+			return conn, nil
+		},
+	}
+	return h
+}
+
+func (h *httpProtocol) Serve(l net.Listener, r router.Router) error {
+	h.initOnce.Do(func() {
+		h.router = r
+		if tlsTransport, ok := l.(transport.TLSTransport); ok {
+			h.httpsMode = true
+			h.server.TLSConfig = tlsTransport.TLSConfig()
+			http2.ConfigureServer(h.server, &http2.Server{
+				MaxReadFrameSize: 16 * 1024,
+			})
+		}
+	})
+	return h.server.Serve(l)
+}
+
+func (h *httpProtocol) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
+	if h.needsAuth {
+		username, password := proxyBasicAuth(req)
+		if username != h.username || password != h.password {
+			resp.Header().Set("Connection", "close")
+			resp.WriteHeader(http.StatusForbidden)
+			return
+		}
+	}
+
+	switch req.Method {
+	case http.MethodConnect:
+		switch req.ProtoMajor {
+		case 1:
+			hConn, _, err := resp.(http.Hijacker).Hijack()
+			if err != nil {
+				resp.Header().Set("Connection", "close")
+				resp.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if _, err := hConn.Write([]byte("HTTP/1.1 200 OK\r\n\r\n")); err != nil {
+				hConn.Close()
+				return
+			}
+
+			if h.httpsMode {
+				h.router.HandleTcpStream("https", hConn, req.RemoteAddr, req.URL.Host)
+			} else {
+				h.router.HandleTcpStream("http", hConn, req.RemoteAddr, req.URL.Host)
+			}
+
+		case 2, 3:
+			resp.WriteHeader(http.StatusOK)
+			resp.(http.Flusher).Flush()
+			h.router.HandleTcpStream("h2", &h2ConnWrapper{
+				req:  req,
+				resp: resp,
+			}, req.RemoteAddr, req.URL.Host)
+
+		default:
+			resp.Header().Set("Connection", "close")
+			resp.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+	default:
+		if req.URL.Scheme != "http" {
+			if h.httpsMode {
+				req.URL.Scheme = "http"
+				req.URL.Host = req.Host
+			} else {
+				resp.WriteHeader(http.StatusForbidden)
+				return
+			}
+		}
+
+		global.Stdout.Println("[http] " + req.RemoteAddr + " -> " + req.URL.String())
+		for header := range req.Header {
+			if strings.HasPrefix(strings.ToLower(header), "proxy-") {
+				req.Header.Del(header)
+			}
+		}
+		result, err := h.transport.RoundTrip(req)
+		if err != nil {
+			resp.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		for k, vs := range result.Header {
+			for _, v := range vs {
+				resp.Header().Add(k, v)
+			}
+		}
+
+		resp.WriteHeader(result.StatusCode)
+		io.Copy(resp, result.Body)
+	}
+}
+
+func (h *httpProtocol) serveConn(conn net.Conn, r router.Router) error {
+	return h.Serve(&connListener{conn: conn}, r)
 }
 
 func proxyBasicAuth(req *http.Request) (username, password string) {
@@ -170,6 +171,28 @@ func proxyBasicAuth(req *http.Request) (username, password string) {
 		return
 	}
 	return cs[:s], cs[s+1:]
+}
+
+type connListener struct {
+	conn     net.Conn
+	consumed uint32
+}
+
+func (c *connListener) Accept() (net.Conn, error) {
+	if atomic.CompareAndSwapUint32(&c.consumed, 0, 1) {
+		return c.conn, nil
+	} else {
+		return nil, net.ErrClosed
+	}
+}
+
+func (c *connListener) Close() error {
+	atomic.StoreUint32(&c.consumed, 1)
+	return nil
+}
+
+func (c *connListener) Addr() net.Addr {
+	return c.conn.LocalAddr()
 }
 
 type h2ConnWrapper struct {

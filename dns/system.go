@@ -9,6 +9,9 @@ type systemResolver struct {
 
 var System = systemResolver{}
 
+func (systemResolver) Start() {
+}
+
 func (systemResolver) ResolveFakeIP(net.IP) string {
 	return ""
 }

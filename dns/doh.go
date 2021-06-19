@@ -3,6 +3,7 @@ package dns
 import (
 	"bytes"
 	"errors"
+	"golang.org/x/net/http2"
 	"net/http"
 	"time"
 )
@@ -13,16 +14,19 @@ type dohClient struct {
 }
 
 func NewDoHClient(server string, timeout time.Duration) *dohClient {
+	t1 := &http.Transport{
+		MaxIdleConns:        100,
+		IdleConnTimeout:     1 * time.Minute,
+		TLSHandshakeTimeout: timeout,
+	}
+	if t2, _ := http2.ConfigureTransports(t1); t2 != nil {
+		t2.MaxFrameSize = dohPacketSize
+	}
 	return &dohClient{
 		url: "https://" + server,
 		client: &http.Client{
-			Transport: &http.Transport{
-				ForceAttemptHTTP2:   true,
-				MaxIdleConns:        100,
-				IdleConnTimeout:     1 * time.Minute,
-				TLSHandshakeTimeout: timeout,
-			},
-			Timeout: timeout,
+			Transport: t1,
+			Timeout:   timeout,
 		},
 	}
 }

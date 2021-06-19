@@ -1,9 +1,7 @@
 package debug
 
 import (
-	"context"
-	"errors"
-	"github.com/DeepAQ/mut/util"
+	"github.com/DeepAQ/mut/global"
 	"net/http"
 	_ "net/http/pprof"
 	"strconv"
@@ -35,23 +33,14 @@ func registerDebugHandler(name string, d *Debuggable) {
 	})
 }
 
-func StartDebugServer(ctx context.Context, port int) {
+func StartDebugServer(port int) {
 	go func() {
 		addr := "localhost:" + strconv.Itoa(port)
 		server := http.Server{Addr: addr}
-		cancelCtx, cancel := context.WithCancel(ctx)
-		go func() {
-			select {
-			case <-cancelCtx.Done():
-				util.Stdout.Println("[debug] shutting down server")
-				server.Shutdown(cancelCtx)
-			}
-		}()
 
-		util.Stdout.Println("[debug] listening on " + addr)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			util.Stderr.Println("[debug] failed to serve: " + err.Error())
+		global.Stdout.Println("[debug] listening on " + addr)
+		if err := server.ListenAndServe(); err != nil {
+			global.Stderr.Println("[debug] failed to serve: " + err.Error())
 		}
-		cancel()
 	}()
 }

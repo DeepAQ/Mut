@@ -9,7 +9,7 @@ type directOutbound struct {
 	resolver dns.Resolver
 }
 
-func Direct(resolver dns.Resolver) *directOutbound {
+func NewDirectOutbound(resolver dns.Resolver) *directOutbound {
 	return &directOutbound{
 		resolver: resolver,
 	}

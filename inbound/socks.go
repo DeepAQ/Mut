@@ -2,12 +2,10 @@ package inbound
 
 import (
 	"bufio"
-	"context"
 	"encoding/binary"
 	"errors"
-	"github.com/DeepAQ/mut/config"
+	"github.com/DeepAQ/mut/global"
 	"github.com/DeepAQ/mut/router"
-	"github.com/DeepAQ/mut/util"
 	"io"
 	"net"
 	"net/url"
@@ -21,7 +19,7 @@ var (
 	errAuthFailed       = errors.New("incorrect username or password")
 )
 
-type socksInbound struct {
+type socksProtocol struct {
 	router     router.Router
 	addr       string
 	needsAuth  bool
@@ -31,14 +29,10 @@ type socksInbound struct {
 	udpConn    net.PacketConn
 }
 
-func Socks(u *url.URL, rt router.Router) (*socksInbound, error) {
+func NewSocksProtocol(u *url.URL) *socksProtocol {
 	username := u.User.Username()
 	password, _ := u.User.Password()
-	if len(username) > 255 || len(password) > 255 {
-		return nil, errAuthTooLong
-	}
-	s := &socksInbound{
-		router:    rt,
+	s := &socksProtocol{
 		addr:      u.Host,
 		needsAuth: len(username) > 0 && len(password) > 0,
 		username:  username,
@@ -48,23 +42,26 @@ func Socks(u *url.URL, rt router.Router) (*socksInbound, error) {
 		if !s.needsAuth {
 			s.udpEnabled = true
 		} else {
-			util.Stdout.Println("[socks] udp with auth is not supported yet")
+			global.Stdout.Println("[socks] udp with auth is not supported yet")
 		}
 	}
-	return s, nil
+	return s
 }
 
-func (s *socksInbound) OnMutStart(ctx context.Context) {
-	if s.udpEnabled {
-		s.startUdpGw(ctx)
+func (s *socksProtocol) Name() string {
+	return "socks5"
+}
+
+func (s *socksProtocol) Serve(l net.Listener, r router.Router) error {
+	if len(s.username) > 255 || len(s.password) > 255 {
+		return errAuthTooLong
 	}
+	s.startUdpGw(r)
+	return serveListenerWithConnHandler("socks", l, r, s.serveConn)
 }
 
-func (s *socksInbound) Name() string {
-	return "socks"
-}
-
-func (s *socksInbound) ServeConn(conn net.Conn, handleTcpStream StreamHandler) error {
+func (s *socksProtocol) serveConn(conn net.Conn, r router.Router) error {
+	defer conn.Close()
 	reader := bufio.NewReaderSize(conn, 64)
 
 	// client greeting
@@ -165,44 +162,31 @@ func (s *socksInbound) ServeConn(conn net.Conn, handleTcpStream StreamHandler) e
 	if _, err := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}); err != nil {
 		return err
 	}
-	handleTcpStream(&TcpStream{
-		Conn:       conn,
-		Protocol:   "socks5",
-		ClientAddr: conn.RemoteAddr().String(),
-		TargetAddr: addrAndPort,
-	})
+	r.HandleTcpStream("socks5", conn, conn.RemoteAddr().String(), addrAndPort)
 	return nil
 }
 
-func (s *socksInbound) startUdpGw(ctx context.Context) {
+func (s *socksProtocol) startUdpGw(r router.Router) {
+	if !s.udpEnabled {
+		return
+	}
+
 	var err error
 	s.udpConn, err = net.ListenPacket("udp", s.addr)
 	if err != nil {
-		util.Stderr.Println("[socks-udp] failed to listen on " + s.addr + ": " + err.Error())
+		global.Stderr.Println("[socks-udp] failed to listen on " + s.addr + ": " + err.Error())
 		return
 	}
-	util.Stdout.Println("[socks-udp] listening on " + s.addr)
-
-	cancelCtx, cancel := context.WithCancel(ctx)
-	go func() {
-		select {
-		case <-cancelCtx.Done():
-			s.udpConn.Close()
-		}
-		util.Stdout.Println("[socks-udp] udp listener stopped")
-	}()
+	global.Stdout.Println("[socks-udp] listening on " + s.addr)
 
 	go func() {
-		buf := util.BufPool.Get(config.UdpMaxLength)
-		defer util.BufPool.Put(buf)
+		buf := global.BufPool.Get(global.UdpMaxLength)
+		defer global.BufPool.Put(buf)
 
 		for {
 			n, cAddr, err := s.udpConn.ReadFrom(buf)
 			if err != nil {
-				if !errors.Is(err, net.ErrClosed) {
-					util.Stderr.Println("[socks-udp] failed to read request: " + err.Error())
-				}
-				cancel()
+				global.Stderr.Println("[socks-udp] failed to read request: " + err.Error())
 				return
 			}
 
@@ -235,14 +219,14 @@ func (s *socksInbound) startUdpGw(ctx context.Context) {
 				continue
 			}
 
-			s.router.SendUdpPacket(s, cAddr, addrAndPort, buf[off:n])
+			r.SendUdpPacket(s, "socks-udp", cAddr, addrAndPort, buf[off:n])
 		}
 	}()
 }
 
-func (s *socksInbound) ReplyUdpPacket(clientAddr, remoteAddr net.Addr, data []byte) error {
-	buf := util.BufPool.Get(len(data) + 10)
-	defer util.BufPool.Put(buf)
+func (s *socksProtocol) ReplyUdpPacket(clientAddr, remoteAddr net.Addr, data []byte) {
+	buf := global.BufPool.Get(len(data) + 10)
+	defer global.BufPool.Put(buf)
 
 	buf[0] = 0
 	buf[1] = 0
@@ -251,14 +235,13 @@ func (s *socksInbound) ReplyUdpPacket(clientAddr, remoteAddr net.Addr, data []by
 	rAddr := remoteAddr.(*net.UDPAddr)
 	ip4 := rAddr.IP.To4()
 	if ip4 == nil {
-		return nil
+		return
 	}
 	copy(buf[4:8], ip4)
 	binary.BigEndian.PutUint16(buf[8:10], uint16(rAddr.Port))
 	copy(buf[10:], data)
 
-	_, err := s.udpConn.WriteTo(buf, clientAddr)
-	return err
+	s.udpConn.WriteTo(buf, clientAddr)
 }
 
 func readLengthAndString(r *bufio.Reader, minLength, maxLength byte) (string, error) {

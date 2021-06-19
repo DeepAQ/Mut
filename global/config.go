@@ -1,4 +1,4 @@
-package config
+package global
 
 import "time"
 
@@ -9,7 +9,7 @@ var (
 	UdpMaxLength       = 2 * 1024
 	TcpStreamTimeout   = 5 * time.Minute
 	UdpStreamTimeout   = 2 * time.Minute
-	TlsCertVerifier    func(serverName string, certs [][]byte) bool
+	TLSCertVerifier    func(serverName string, certs [][]byte) bool
 )
 
 func SetFreeMemoryInterval(interval int) {

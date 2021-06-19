@@ -1,18 +1,22 @@
-package core
+package global
 
 import (
-	"github.com/DeepAQ/mut/util"
 	"log"
+	"runtime"
 	"runtime/debug"
 )
 
 func UseDefaultLogger() {
-	util.Stdout = log.Default()
-	util.Stderr = log.Default()
+	Stdout = log.Default()
+	Stderr = log.Default()
 }
 
 func DisableBufPool() {
-	util.BufPool = util.NewBufPool(0, 0)
+	BufPool = NewBufPool(0, 0)
+}
+
+func SetGOMAXPROCS(value int) {
+	runtime.GOMAXPROCS(value)
 }
 
 func SetGCPercent(percent int) {

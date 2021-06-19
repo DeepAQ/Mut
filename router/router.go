@@ -2,17 +2,15 @@ package router
 
 import (
 	"errors"
-	"github.com/DeepAQ/mut/config"
 	"github.com/DeepAQ/mut/dns"
+	"github.com/DeepAQ/mut/global"
 	"github.com/DeepAQ/mut/outbound"
-	"github.com/DeepAQ/mut/udp"
-	"github.com/DeepAQ/mut/util"
-	"github.com/yl2chen/cidranger"
 	"net"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 )
@@ -22,10 +20,23 @@ var (
 	errCosmicRay = errors.New("this device may be affected by cosmic rays")
 )
 
+type UdpPacketReceiver interface {
+	ReplyUdpPacket(clientAddr, remoteAddr net.Addr, data []byte)
+}
+
 type Router interface {
 	DialTcp(targetAddr string) (conn net.Conn, err error, outName, realAddr string)
-	SendUdpPacket(inbound udp.Inbound, clientAddr net.Addr, targetAddr string, data []byte) error
+	HandleTcpStream(protocolName string, conn net.Conn, clientAddr, targetAddr string)
+	SendUdpPacket(src UdpPacketReceiver, protocol string, clientAddr net.Addr, targetAddr string, data []byte)
 }
+
+type Action uint8
+
+var (
+	ActionDirect  Action = 0
+	ActionDefault Action = 1
+	ActionReject  Action = 2
+)
 
 type ruleAction struct {
 	rule   Rule
@@ -68,14 +79,8 @@ func NewRouter(conf string, resolver dns.Resolver, defaultOut outbound.Outbound)
 			if err != nil {
 				return nil, err
 			}
-			suffixes := map[string]struct{}{}
-			for _, line := range lines {
-				if len(line) > 0 {
-					suffixes[line] = struct{}{}
-				}
-			}
 			ruleSet = append(ruleSet, &ruleAction{
-				rule:   &domainRule{suffixes: suffixes},
+				rule:   NewDomainRule(lines),
 				action: action,
 			})
 		} else if strings.HasPrefix(r, "cidr:") {
@@ -83,18 +88,8 @@ func NewRouter(conf string, resolver dns.Resolver, defaultOut outbound.Outbound)
 			if err != nil {
 				return nil, err
 			}
-			ranger := cidranger.NewPCTrieRanger()
-			for _, line := range lines {
-				if len(line) > 0 {
-					if _, cidr, err := net.ParseCIDR(line); err == nil {
-						if err := ranger.Insert(cidranger.NewBasicRangerEntry(*cidr)); err != nil {
-							return nil, err
-						}
-					}
-				}
-			}
 			ruleSet = append(ruleSet, &ruleAction{
-				rule:   &cidrRule{ranger: ranger},
+				rule:   NewCIDRRule(lines),
 				action: action,
 			})
 		} else if r == "final" {
@@ -108,7 +103,7 @@ func NewRouter(conf string, resolver dns.Resolver, defaultOut outbound.Outbound)
 		finalAction: finalAction,
 		resolver:    resolver,
 		defaultOut:  defaultOut,
-		directOut:   outbound.Direct(resolver),
+		directOut:   outbound.NewDirectOutbound(resolver),
 	}, nil
 }
 
@@ -123,7 +118,7 @@ func (r *router) DialTcp(targetAddr string) (conn net.Conn, err error, outName, 
 			if !resolved {
 				resolved = true
 				if ip, err = r.resolver.Lookup(host); err != nil {
-					util.Stderr.Println("[router] failed to resolve host: " + err.Error())
+					global.Stderr.Println("[router] failed to resolve host: " + err.Error())
 				}
 			}
 			if ip == nil {
@@ -154,19 +149,41 @@ func (r *router) DialTcp(targetAddr string) (conn net.Conn, err error, outName, 
 	return
 }
 
-func (r *router) SendUdpPacket(inbound udp.Inbound, clientAddr net.Addr, targetAddr string, data []byte) error {
+func (r *router) HandleTcpStream(protocolName string, conn net.Conn, clientAddr, targetAddr string) {
+	if global.FreeMemoryInterval > 0 {
+		now := time.Now().Unix()
+		last := atomic.LoadInt64(&global.LastMemoryFree)
+		if int(now-last) >= global.FreeMemoryInterval && atomic.CompareAndSwapInt64(&global.LastMemoryFree, last, now) {
+			global.FreeOSMemory()
+		}
+	}
+
+	dConn, err, outName, realAddr := r.DialTcp(targetAddr)
+	if err != nil {
+		conn.Close()
+		global.Stderr.Println("[" + protocolName + "] " + clientAddr + " -" + outName + "-> " + realAddr + " error: " + err.Error())
+		return
+	}
+
+	global.Stdout.Println("[" + protocolName + "] " + clientAddr + " <-" + outName + "-> " + realAddr)
+	go relay(conn, dConn)
+	relay(dConn, conn)
+	global.Stdout.Println("[" + protocolName + "] " + clientAddr + " >-" + outName + "-< " + realAddr)
+}
+
+func (r *router) SendUdpPacket(src UdpPacketReceiver, protocol string, clientAddr net.Addr, targetAddr string, data []byte) {
 	host, port, ip := r.resolveRealAddr(targetAddr)
 	if ip == nil {
 		var err error
 		if ip, err = r.resolver.Lookup(host); err != nil {
-			util.Stderr.Println("[" + inbound.Name() + "-udp] failed to resolve host: " + err.Error())
-			return err
+			global.Stderr.Println("[" + protocol + "] failed to resolve host: " + err.Error())
+			return
 		}
 	}
 	portInt, err := strconv.Atoi(port)
 	if err != nil {
-		util.Stderr.Println("[" + inbound.Name() + "-udp] invalid port: " + port)
-		return err
+		global.Stderr.Println("[" + protocol + "] invalid port: " + port)
+		return
 	}
 	dAddr := &net.UDPAddr{
 		IP:   ip,
@@ -179,40 +196,38 @@ func (r *router) SendUdpPacket(inbound udp.Inbound, clientAddr net.Addr, targetA
 	if conn, ok := r.udpNatMap.Load(natKey); !ok {
 		conn, err := net.ListenPacket("udp", "")
 		if err != nil {
-			util.Stderr.Println("[" + inbound.Name() + "-udp] failed to open connection: " + err.Error())
-			return err
+			global.Stderr.Println("[" + protocol + "] failed to open connection: " + err.Error())
+			return
 		}
-		util.Stdout.Println("[" + inbound.Name() + "-udp] " + natKey + " <-> " + conn.LocalAddr().String())
-		go r.udpReadLoop(inbound, clientAddr, conn)
+		global.Stdout.Println("[" + protocol + "] " + natKey + " <-> " + conn.LocalAddr().String())
+		go r.udpReadLoop(src, protocol, clientAddr, conn)
 		r.udpNatMap.Store(natKey, conn)
 		cConn = conn
 	} else {
 		cConn = conn.(net.PacketConn)
 	}
 
-	cConn.SetDeadline(time.Now().Add(config.UdpStreamTimeout))
+	cConn.SetDeadline(time.Now().Add(global.UdpStreamTimeout))
 	if _, err := cConn.WriteTo(data, dAddr); err != nil {
-		util.Stderr.Println("[" + inbound.Name() + "-udp] " + err.Error())
-		return err
+		global.Stderr.Println("[" + protocol + "] " + err.Error())
 	}
-	return nil
 }
 
-func (r *router) udpReadLoop(inbound udp.Inbound, clientAddr net.Addr, lConn net.PacketConn) {
-	buf := util.BufPool.Get(config.UdpMaxLength)
-	defer util.BufPool.Put(buf)
+func (r *router) udpReadLoop(src UdpPacketReceiver, protocol string, clientAddr net.Addr, lConn net.PacketConn) {
+	buf := global.BufPool.Get(global.UdpMaxLength)
+	defer global.BufPool.Put(buf)
 
 	for {
-		lConn.SetDeadline(time.Now().Add(config.UdpStreamTimeout))
+		lConn.SetDeadline(time.Now().Add(global.UdpStreamTimeout))
 		n, addr, err := lConn.ReadFrom(buf)
 		if err != nil {
 			break
 		}
-		inbound.ReplyUdpPacket(clientAddr, addr, buf[:n])
+		src.ReplyUdpPacket(clientAddr, addr, buf[:n])
 	}
 
 	natKey := clientAddr.String()
-	util.Stdout.Println("[" + inbound.Name() + "-udp] " + natKey + " >-< " + lConn.LocalAddr().String())
+	global.Stdout.Println("[" + protocol + "] " + natKey + " >-< " + lConn.LocalAddr().String())
 	r.udpNatMap.Delete(natKey)
 	lConn.Close()
 }
@@ -244,4 +259,24 @@ func readLinesFromFile(filename string) ([]string, error) {
 		lines[i] = strings.TrimSpace(lines[i])
 	}
 	return lines, nil
+}
+
+func relay(src, dst net.Conn) {
+	defer src.Close()
+	defer dst.Close()
+	buf := global.BufPool.Get(global.ConnBufSize)
+	defer global.BufPool.Put(buf)
+
+	for {
+		src.SetDeadline(time.Now().Add(global.TcpStreamTimeout))
+		nr, err := src.Read(buf)
+		if err != nil {
+			return
+		}
+
+		dst.SetDeadline(time.Now().Add(global.TcpStreamTimeout))
+		if nw, err := dst.Write(buf[:nr]); nw < nr || err != nil {
+			return
+		}
+	}
 }

@@ -1,4 +1,4 @@
-package util
+package global
 
 import (
 	"log"

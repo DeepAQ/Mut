@@ -3,8 +3,10 @@ package outbound
 import (
 	"errors"
 	"github.com/DeepAQ/mut/dns"
+	"github.com/DeepAQ/mut/transport"
 	"net"
 	"net/url"
+	"strings"
 )
 
 type Outbound interface {
@@ -13,18 +15,38 @@ type Outbound interface {
 }
 
 func CreateOutbound(u *url.URL, resolver dns.Resolver) (Outbound, error) {
+	var tp transport.OutboundTransport
+	var schemeParts []string
 	switch u.Scheme {
-	case "http":
-		return Http(u)
 	case "https":
-		return Https(u)
+		schemeParts = []string{"http", "tls"}
 	case "h2":
-		return Http2(u)
-	case "socks", "socks5":
-		return Socks(u)
-	case "direct", "":
-		return Direct(resolver), nil
+		schemeParts = []string{"h2", "tls"}
 	default:
-		return nil, errors.New("unsupported outbound type " + u.Scheme)
+		schemeParts = strings.Split(u.Scheme, "+")
+	}
+
+	protocol := schemeParts[0]
+	for i := len(schemeParts) - 1; i > 0; i-- {
+		newTp, err := transport.CreateOutboundTransport(schemeParts[i], u, tp)
+		if err != nil {
+			return nil, err
+		}
+		tp = newTp
+	}
+
+	switch protocol {
+	case "http":
+		return NewHttpOutbound(u, tp)
+	case "h2":
+		return NewHttp2Outbound(u, tp)
+	case "h3":
+		return NewHttp3Outbound(u)
+	case "socks", "socks5":
+		return NewSocksOutbound(u, tp)
+	case "direct", "":
+		return NewDirectOutbound(resolver), nil
+	default:
+		return nil, errors.New("unsupported outbound protocol " + u.Scheme)
 	}
 }

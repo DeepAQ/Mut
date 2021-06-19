@@ -1,25 +1,30 @@
-package util
+package global
 
 import (
 	"sync"
 )
 
-var BufPool *bufPool
+var BufPool BufferPool
 
 func init() {
 	BufPool = NewBufPool(64, 65536)
 }
 
-type bufPool struct {
+type BufferPool interface {
+	Get(size int) []byte
+	Put(b []byte)
+}
+
+type defaultBufPool struct {
 	minExp int
 	maxExp int
 	bufs   []sync.Pool
 }
 
-func NewBufPool(minSize, maxSize uint32) *bufPool {
+func NewBufPool(minSize, maxSize uint32) *defaultBufPool {
 	minExp := log2(minSize)
 	maxExp := log2(maxSize)
-	bp := &bufPool{
+	bp := &defaultBufPool{
 		minExp: minExp,
 		maxExp: maxExp,
 		bufs:   make([]sync.Pool, maxExp-minExp+1),
@@ -53,7 +58,7 @@ func log2(x uint32) int {
 	}
 }
 
-func (bp *bufPool) Get(size int) []byte {
+func (bp *defaultBufPool) Get(size int) []byte {
 	exp := log2(uint32(size))
 	if exp > bp.maxExp {
 		return make([]byte, size)
@@ -65,7 +70,7 @@ func (bp *bufPool) Get(size int) []byte {
 	return bp.bufs[exp-bp.minExp].Get().([]byte)[:size]
 }
 
-func (bp *bufPool) Put(b []byte) {
+func (bp *defaultBufPool) Put(b []byte) {
 	exp := log2(uint32(cap(b)))
 	if exp > bp.maxExp || exp < bp.minExp || cap(b) != (1<<exp) {
 		return

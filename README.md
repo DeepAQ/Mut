@@ -15,9 +15,9 @@ Usage of mut:
   -dns string
         dns config, protocol://host:port[/path...]
   -in string
-        inbound config, protocol://[username:password@]host:port[/?option=value...]
+        inbound config, scheme://[username:password@]host:port[/?option=value...]
   -out string
-        outbound config, protocol://[username:password@]host:port[/?option=value...]
+        outbound config, scheme://[username:password@]host:port[/?option=value...]
   -rules string
         router rules, rule1:action1[;rule2:action2...][;final:action]
   -stdin
@@ -26,64 +26,90 @@ Usage of mut:
 
 ## Configuration
 
-### Inbound config
+### New URL schemes
 
-#### `forward` inbound
+Starting from 2021.06 release, inbound and outbound configuration URL schemes will use `protocol+transport[+transport...]` format.
+
+#### `tls` transport
+
+Adds TLS 1.2/1.3 support over a TCP connection.
+
+Options:
+- `cert`: (inbound only) path to a base64-encoded certificate file
+- `key`: (inbound only) path to a base64-encoded private key file
+- `host`: (optional, outbound only) overrides the SNI server name. If not specified, the outbound hostname will be used as server name.
+- `alpn`: (optional, outbound only) comma-seperated Application-Layer Protocol Negotiation values.
+
+#### `mux` transport
+
+Adds connection multiplexing ability over a TCP connection, powered by [Yamux](https://github.com/hashicorp/yamux).
+
+Options:
+- `concurrency`: (outbound only) the number of concurrent TCP connections to open.
+
+### Inbound protocols
+
+#### `forward` protocol
 
 Forwards all TCP traffic to the given target destination.
 
 Options:
 - `target`: address of the target destination
 
-#### `http` inbound
+#### `http` protocol
 
-Receives standard HTTP/1.1 requests. HTTP basic authorization is supported. Both plain HTTP requests and CONNECT requests are supported.
+Receives normal HTTP requests and CONNECT requests. HTTP basic authorization is supported. HTTP/2 is automatically enabled if the underlying transport is `tls`, and `h2` is present in ALPN values sent by client.
 
-#### `https` inbound
+`https` scheme is now an alias of `http+tls`.
 
-Receives HTTP requests over a TLS 1.2/1.3 connection. HTTP/2 is automatically enabled if the client supports it.
+#### `h3` protocol (experimental)
+
+Receives normal and CONNECT requests in HTTP/3 over QUIC.
+
+Options: same as `tls` inbound transport.
+
+#### `socks` protocol
+
+Receives SOCKS5 requests. Username and password authorization is supported. Currently, UDP bind requests are not supported but local UDP relay gateway is supported.
 
 Options:
-- `cert`: path to a base64-encoded certificate file
-- `key`: path to a base64-encoded private key file
+- `udp=1`: enables local UDP relay gateway on the same port.
 
-#### `socks` inbound
+#### `mix` protocol
 
-Receives SOCKS5 requests. Username and password authorization is supported. Currently, UDP bind requests are not supported.
+Receives both HTTP/1.1 and SOCKS5 requests. The underlying protocol is automatically determined by the first packet received from client.
 
-#### `mix` inbound
+Options: same as `socks` protocol.
 
-Receives both HTTP and SOCKS5 requests. The underlying protocol is automatically determined by the first packet received from client. 
+### Outbound protocols
 
-### Outbound config
-
-#### `direct` outbound
+#### `direct` protocol
 
 Sends all outbound traffic directly.
 
-#### `http` outbound
+#### `socks` protocol
+
+Sends all outbound traffic to a target that receives SOCKS5 requests. Username and password authorization is supported.
+
+#### `http` protocol
 
 Sends all outbound traffic to a target that receives HTTP/1.1 CONNECT requests. HTTP basic authorization is supported.
 
-#### `https` outbound
+`https` scheme is now an alias of `http+tls`.
 
-Sends all outbound traffic to a target that receives HTTP/1.1 CONNECT requests over a TLS 1.2/1.3 connection.
-
-Options:
-- `host`: (optional) overrides the SNI server hostname. If not specified, the outbound hostname will be used as server name.
-
-#### `h2` outbound
+#### `h2` protocol
 
 Sends all outbound traffic to a target that receives HTTP/2 CONNECT requests over a TLS 1.2/1.3 connection.
 
+`h2` scheme is equivalent to `h2+tls`.
+
 Options:
-- `host`: (optional) see above
 - `concurrency`: (optional, default=8) specifies how many concurrent TCP connections (at least) to open.
 - `alive`: (optional) specifies how long a TCP connection can keep. If not specified, there will be no limit to the TCP keepalive time.
 
-#### `socks` outbound
+#### `h3` protocol (experimental)
 
-Sends all outbound traffic to a target that receives SOCKS5 requests. Username and password authorization is supported.
+Sends all outbound traffic to a target that receives HTTP/3 CONNECT requests over QUIC.
 
 ### DNS config
 

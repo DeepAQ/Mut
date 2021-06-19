@@ -1,10 +1,9 @@
 package inbound
 
 import (
-	"context"
 	"errors"
+	"github.com/DeepAQ/mut/global"
 	"github.com/DeepAQ/mut/router"
-	"github.com/DeepAQ/mut/util"
 	"net"
 	"net/url"
 	"strings"
@@ -18,52 +17,44 @@ var (
 	errUnknownConnType = errors.New("unknown conn type")
 )
 
-type mixInbound struct {
-	http  *httpInbound
-	socks *socksInbound
+type mixProtocol struct {
+	http  *httpProtocol
+	socks *socksProtocol
 }
 
-func Mix(u *url.URL, rt router.Router) (*mixInbound, error) {
-	h, err := Http(u, rt)
-	if err != nil {
-		return nil, err
+func NewMixProtocol(u *url.URL) *mixProtocol {
+	return &mixProtocol{
+		http:  NewHttpProtocol(u),
+		socks: NewSocksProtocol(u),
 	}
-	s, err := Socks(u, rt)
-	if err != nil {
-		return nil, err
+}
+
+func (m *mixProtocol) Serve(l net.Listener, r router.Router) error {
+	if len(m.socks.username) > 255 || len(m.socks.password) > 255 {
+		return errAuthTooLong
 	}
-	return &mixInbound{
-		http:  h,
-		socks: s,
-	}, nil
+	m.socks.startUdpGw(r)
+	return serveListenerWithConnHandler("mix", l, r, m.serveConn)
 }
 
-func (m *mixInbound) OnMutStart(ctx context.Context) {
-	m.socks.OnMutStart(ctx)
-}
-
-func (m *mixInbound) Name() string {
-	return "mix"
-}
-
-func (m *mixInbound) ServeConn(conn net.Conn, handleTcpStream StreamHandler) error {
-	buf := util.BufPool.Get(64)
+func (m *mixProtocol) serveConn(conn net.Conn, r router.Router) error {
+	buf := global.BufPool.Get(64)
 	n, err := conn.Read(buf)
 	if n <= 0 || err != nil {
-		util.BufPool.Put(buf)
+		global.BufPool.Put(buf)
 		return err
 	}
 	buf = buf[:n]
 	if buf[0] == 0x05 {
-		return m.socks.ServeConn(newMixConn(conn, buf), handleTcpStream)
+		return m.socks.serveConn(newMixConn(conn, buf), r)
 	} else {
 		str := *(*string)(unsafe.Pointer(&buf))
 		if strings.HasPrefix(str, "CONNECT ") ||
 			strings.Index(str, "HTTP/") >= 0 ||
 			strings.Index(str, "http://") >= 0 {
-			return m.http.ServeConn(newMixConn(conn, buf), handleTcpStream)
+			return m.http.serveConn(newMixConn(conn, buf), r)
 		} else {
-			util.BufPool.Put(buf)
+			global.BufPool.Put(buf)
 			conn.Write([]byte("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"))
 			return errUnknownConnType
 		}
@@ -90,7 +81,7 @@ func newMixConn(conn net.Conn, buf []byte) *mixConn {
 func (m *mixConn) closeBufLocked() {
 	if m.buf != nil {
 		m.bufOffset = m.bufLimit
-		util.BufPool.Put(m.buf)
+		global.BufPool.Put(m.buf)
 		m.buf = nil
 	}
 }

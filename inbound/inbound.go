@@ -3,60 +3,57 @@ package inbound
 import (
 	"errors"
 	"github.com/DeepAQ/mut/router"
-	"net"
+	"github.com/DeepAQ/mut/transport"
 	"net/url"
-	"sync/atomic"
+	"strings"
 )
 
-type TcpStream struct {
-	Conn       net.Conn
-	Protocol   string
-	ClientAddr string
-	TargetAddr string
-}
-
-type StreamHandler func(*TcpStream)
+var (
+	errNoProtocol = errors.New("no inbound protocol provided")
+)
 
 type Inbound interface {
 	Name() string
-	ServeConn(conn net.Conn, handleTcpStream StreamHandler) error
+	Serve(r router.Router) error
 }
 
-func CreateInbound(u *url.URL, rt router.Router) (Inbound, error) {
+func CreateInbound(u *url.URL) (Inbound, error) {
+	var tp transport.InboundTransport
+	var schemeParts []string
 	switch u.Scheme {
-	case "http":
-		return Http(u, rt)
 	case "https", "h2":
-		return Https(u, rt)
-	case "socks", "socks5":
-		return Socks(u, rt)
-	case "mix":
-		return Mix(u, rt)
-	case "forward":
-		return Forward(u)
+		schemeParts = []string{"http", "tls"}
 	default:
-		return nil, errors.New("unsupported inbound type " + u.Scheme)
+		schemeParts = strings.Split(u.Scheme, "+")
 	}
-}
 
-type connListener struct {
-	conn     net.Conn
-	consumed uint32
-}
-
-func (c *connListener) Accept() (net.Conn, error) {
-	if atomic.CompareAndSwapUint32(&c.consumed, 0, 1) {
-		return c.conn, nil
-	} else {
-		return nil, net.ErrClosed
+	if len(schemeParts) == 0 {
+		return nil, errNoProtocol
 	}
-}
+	protocol := schemeParts[0]
+	for i := len(schemeParts) - 1; i > 0; i-- {
+		newTp, err := transport.CreateInboundTransport(schemeParts[i], u, tp)
+		if err != nil {
+			if tp != nil {
+				tp.Close()
+			}
+			return nil, err
+		}
+		tp = newTp
+	}
 
-func (c *connListener) Close() error {
-	atomic.StoreUint32(&c.consumed, 1)
-	return nil
-}
-
-func (c *connListener) Addr() net.Addr {
-	return c.conn.LocalAddr()
+	switch protocol {
+	case "http":
+		return NewTcpInbound(u, NewHttpProtocol(u), tp)
+	case "h3":
+		return NewH3Inbound(u), nil
+	case "socks", "socks5":
+		return NewTcpInbound(u, NewSocksProtocol(u), tp)
+	case "mix":
+		return NewTcpInbound(u, NewMixProtocol(u), tp)
+	case "forward":
+		return NewTcpInbound(u, NewForwardProtocol(u), tp)
+	default:
+		return nil, errors.New("unsupported inbound protocol " + protocol)
+	}
 }

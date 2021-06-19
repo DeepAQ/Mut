@@ -14,6 +14,7 @@ const (
 )
 
 type Resolver interface {
+	Start()
 	ResolveFakeIP(ip net.IP) string
 	Lookup(host string) (net.IP, error)
 	Debug() string

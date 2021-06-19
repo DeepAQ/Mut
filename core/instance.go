@@ -2,52 +2,38 @@ package core
 
 import (
 	"bufio"
-	"context"
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/DeepAQ/mut/config"
 	"github.com/DeepAQ/mut/debug"
 	"github.com/DeepAQ/mut/dns"
+	"github.com/DeepAQ/mut/global"
 	"github.com/DeepAQ/mut/inbound"
 	"github.com/DeepAQ/mut/outbound"
 	"github.com/DeepAQ/mut/router"
-	"github.com/DeepAQ/mut/util"
-	"net"
 	"net/url"
 	"os"
 	"strings"
-	"sync/atomic"
-	"time"
+	"sync"
 )
 
 var (
 	stdinFlag = flag.Bool("stdin", false, "receive other arguments from stdin")
-	inFlag    = flag.String("in", "", "inbound config, protocol://[username:password@]host:port[/?option=value...]")
-	outFlag   = flag.String("out", "", "outbound config, protocol://[username:password@]host:port[/?option=value...]")
+	inFlag    = flag.String("in", "", "inbound config, scheme://[username:password@]host:port[/?option=value...]")
+	outFlag   = flag.String("out", "", "outbound config, scheme://[username:password@]host:port[/?option=value...]")
 	dnsFlag   = flag.String("dns", "", "dns config, protocol://host:port[/path...]")
 	rulesFlag = flag.String("rules", "", "router rules, rule1:action1[;rule2:action2...][;final:action]")
 	debugFlag = flag.Int("debug", 0, "localhost debug port")
 )
 
-type Instance interface {
-	Start()
-	Stop()
-	Run()
-}
-
 type instance struct {
-	ctx  context.Context
-	stop context.CancelFunc
-
-	debugPort int
-	inAddr    string
 	inbound   inbound.Inbound
 	router    router.Router
 	resolver  dns.Resolver
+	debugPort int
 }
 
-func createInstance(args []string) (*instance, error) {
+func newInstance(args []string) (*instance, error) {
 	fmt.Println("Mut [Multi-usage tunnel], a DeepAQ Labs project")
 	flag.CommandLine.Parse(args)
 	if *stdinFlag {
@@ -56,148 +42,63 @@ func createInstance(args []string) (*instance, error) {
 		flag.CommandLine.Parse(strings.Split(strings.TrimSpace(line), " "))
 	}
 
-	var resolver dns.Resolver = dns.System
-	if len(*dnsFlag) > 0 {
-		dnsUrl, err := url.Parse(*dnsFlag)
-		if err != nil {
-			return nil, errors.New("failed to parse dns config: " + err.Error())
-		}
-		resolver, err = dns.CreateResolver(dnsUrl)
-		if err != nil {
-			return nil, errors.New("failed to initialize dns resolver: " + err.Error())
-		}
-	}
-	debug.Dns = resolver
-
-	outUrl, err := url.Parse(*outFlag)
-	if err != nil {
-		return nil, errors.New("failed to parse outbound config: " + err.Error())
-	}
-	out, err := outbound.CreateOutbound(outUrl, resolver)
-	if err != nil {
-		return nil, errors.New("failed to initialize outbound: " + err.Error())
-	}
-
-	rt, err := router.NewRouter(*rulesFlag, resolver, out)
-	if err != nil {
-		return nil, errors.New("failed to initialize router: " + err.Error())
+	var err error
+	instance := &instance{
+		debugPort: *debugFlag,
 	}
 
 	inUrl, err := url.Parse(*inFlag)
 	if err != nil {
 		return nil, errors.New("failed to parse inbound config: " + err.Error())
 	}
-	in, err := inbound.CreateInbound(inUrl, rt)
+	instance.inbound, err = inbound.CreateInbound(inUrl)
 	if err != nil {
 		return nil, errors.New("failed to initialize inbound: " + err.Error())
 	}
 
-	ctx, stop := context.WithCancel(context.Background())
-	instance := &instance{
-		ctx:       ctx,
-		stop:      stop,
-		debugPort: *debugFlag,
-		inAddr:    inUrl.Host,
-		inbound:   in,
-		router:    rt,
-		resolver:  resolver,
+	instance.resolver = dns.System
+	if len(*dnsFlag) > 0 {
+		dnsUrl, err := url.Parse(*dnsFlag)
+		if err != nil {
+			return nil, errors.New("failed to parse dns config: " + err.Error())
+		}
+		instance.resolver, err = dns.CreateResolver(dnsUrl)
+		if err != nil {
+			return nil, errors.New("failed to initialize dns resolver: " + err.Error())
+		}
 	}
+	debug.Dns = instance.resolver
+
+	outUrl, err := url.Parse(*outFlag)
+	if err != nil {
+		return nil, errors.New("failed to parse outbound config: " + err.Error())
+	}
+	out, err := outbound.CreateOutbound(outUrl, instance.resolver)
+	if err != nil {
+		return nil, errors.New("failed to initialize outbound: " + err.Error())
+	}
+
+	instance.router, err = router.NewRouter(*rulesFlag, instance.resolver, out)
+	if err != nil {
+		return nil, errors.New("failed to initialize router: " + err.Error())
+	}
+
 	return instance, nil
-}
-
-func (i *instance) Start() {
-	go i.Run()
-}
-
-func (i *instance) Stop() {
-	i.stop()
 }
 
 func (i *instance) Run() {
 	if i.debugPort > 0 {
-		debug.StartDebugServer(i.ctx, i.debugPort)
+		debug.StartDebugServer(i.debugPort)
 	}
-	i.callStartListener(i.inbound)
-	i.callStartListener(i.resolver)
+	i.resolver.Start()
 
-	listener, err := net.Listen("tcp", i.inAddr)
-	if err != nil {
-		util.Stderr.Println("[tcp] failed to listen on " + i.inAddr + ": " + err.Error())
-		return
-	}
-	util.Stdout.Println("[" + i.inbound.Name() + "] listening on " + i.inAddr)
-
-	cancelCtx, cancel := context.WithCancel(i.ctx)
+	wg := sync.WaitGroup{}
+	wg.Add(1)
 	go func() {
-		select {
-		case <-cancelCtx.Done():
-			listener.Close()
+		if err := i.inbound.Serve(i.router); err != nil {
+			global.Stderr.Println("[" + i.inbound.Name() + "] failed to serve: " + err.Error())
 		}
-		util.Stdout.Println("[" + i.inbound.Name() + "] listener on " + i.inAddr + " stopped")
+		wg.Done()
 	}()
-
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			if !errors.Is(err, net.ErrClosed) {
-				util.Stderr.Println("[" + i.inbound.Name() + "] failed to accept new connection: " + err.Error())
-			}
-			cancel()
-			return
-		}
-
-		go func() {
-			err := i.inbound.ServeConn(conn, func(stream *inbound.TcpStream) {
-				if config.FreeMemoryInterval > 0 {
-					now := time.Now().Unix()
-					last := atomic.LoadInt64(&config.LastMemoryFree)
-					if int(now-last) >= config.FreeMemoryInterval && atomic.CompareAndSwapInt64(&config.LastMemoryFree, last, now) {
-						FreeOSMemory()
-					}
-				}
-
-				dConn, err, outName, realAddr := i.router.DialTcp(stream.TargetAddr)
-				if err != nil {
-					stream.Conn.Close()
-					util.Stderr.Println("[" + stream.Protocol + "] " + stream.ClientAddr + " -" + outName + "-> " + realAddr + " error: " + err.Error())
-					return
-				}
-
-				util.Stdout.Println("[" + stream.Protocol + "] " + stream.ClientAddr + " <-" + outName + "-> " + realAddr)
-				go relay(stream.Conn, dConn)
-				relay(dConn, stream.Conn)
-				util.Stdout.Println("[" + stream.Protocol + "] " + stream.ClientAddr + " >-" + outName + "-< " + realAddr)
-			})
-			if err != nil {
-				conn.Close()
-				util.Stderr.Println("[" + i.inbound.Name() + "] failed to serve conn from " + conn.RemoteAddr().String() + ": " + err.Error())
-			}
-		}()
-	}
-}
-
-func (i *instance) callStartListener(v interface{}) {
-	if l, ok := v.(StartListener); ok {
-		l.OnMutStart(i.ctx)
-	}
-}
-
-func relay(src, dst net.Conn) {
-	defer src.Close()
-	defer dst.Close()
-	buf := util.BufPool.Get(config.ConnBufSize)
-	defer util.BufPool.Put(buf)
-
-	for {
-		src.SetDeadline(time.Now().Add(config.TcpStreamTimeout))
-		nr, err := src.Read(buf)
-		if err != nil {
-			return
-		}
-
-		dst.SetDeadline(time.Now().Add(config.TcpStreamTimeout))
-		if nw, err := dst.Write(buf[:nr]); nw < nr || err != nil {
-			return
-		}
-	}
+	wg.Wait()
 }

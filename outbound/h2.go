@@ -2,11 +2,11 @@ package outbound
 
 import (
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"errors"
-	"github.com/DeepAQ/mut/config"
-	"github.com/DeepAQ/mut/util"
+	"github.com/DeepAQ/mut/global"
+	"github.com/DeepAQ/mut/transport"
+	"golang.org/x/net/http2"
 	"io"
 	"math/rand"
 	"net"
@@ -17,21 +17,17 @@ import (
 	"time"
 )
 
-var (
-	errResponseNotHttp2 = errors.New("server response is not http/2")
-)
-
 type h2Outbound struct {
+	transport transport.TcpOutboundTransport
 	host      string
 	needsAuth bool
 	username  string
 	password  string
 	aliveTime time.Duration
-	tlsConfig *tls.Config
 
-	transport []*http.Transport
-	tMutex    []sync.Mutex
-	tDeadline []time.Time
+	h2Transports []*http2.Transport
+	tMutex       []sync.Mutex
+	tDeadline    []time.Time
 }
 
 const (
@@ -41,13 +37,18 @@ const (
 	Http2RequestTimeOut     = 5 * time.Second
 )
 
-func Http2(u *url.URL) (*h2Outbound, error) {
+func NewHttp2Outbound(u *url.URL, tp transport.OutboundTransport) (*h2Outbound, error) {
+	tcpTransport, err := transport.RequireTcpOutboundTransport(u, tp)
+	if err != nil {
+		return nil, err
+	}
+
+	if tlsTransport, ok := tcpTransport.(transport.TLSTransport); ok {
+		tlsTransport.TLSConfig().NextProtos = []string{"h2", "http/1.1"}
+	}
+
 	username := u.User.Username()
 	password, _ := u.User.Password()
-	serverName := u.Query().Get("host")
-	if len(serverName) == 0 {
-		serverName, _, _ = net.SplitHostPort(u.Host)
-	}
 	concurrency, err := strconv.Atoi(u.Query().Get("concurrency"))
 	if concurrency <= 0 || err != nil {
 		concurrency = Http2DefaultConcurrency
@@ -60,28 +61,16 @@ func Http2(u *url.URL) (*h2Outbound, error) {
 	}
 
 	h := &h2Outbound{
+		transport: tcpTransport,
 		host:      u.Host,
 		needsAuth: len(username) > 0 && len(password) > 0,
 		username:  username,
 		password:  password,
-		tlsConfig: &tls.Config{
-			ServerName: serverName,
-			NextProtos: []string{"h2"},
-			MinVersion: tls.VersionTLS12,
-		},
 		aliveTime: time.Duration(aliveTime) * time.Second,
-		transport: make([]*http.Transport, concurrency),
-		tMutex:    make([]sync.Mutex, concurrency),
-		tDeadline: make([]time.Time, concurrency),
-	}
-	if config.TlsCertVerifier != nil {
-		h.tlsConfig.InsecureSkipVerify = true
-		h.tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			if !config.TlsCertVerifier(serverName, rawCerts) {
-				return errCertNotTrusted
-			}
-			return nil
-		}
+
+		h2Transports: make([]*http2.Transport, concurrency),
+		tMutex:       make([]sync.Mutex, concurrency),
+		tDeadline:    make([]time.Time, concurrency),
 	}
 	return h, nil
 }
@@ -114,11 +103,6 @@ func (h *h2Outbound) DialTcp(targetAddr string) (net.Conn, error) {
 		pw.Close()
 		return nil, err
 	}
-	if resp.ProtoMajor != 2 {
-		req.Body.Close()
-		pw.Close()
-		return nil, errResponseNotHttp2
-	}
 	if resp.StatusCode != http.StatusOK {
 		req.Body.Close()
 		pw.Close()
@@ -127,27 +111,26 @@ func (h *h2Outbound) DialTcp(targetAddr string) (net.Conn, error) {
 
 	return &h2ConnWrapper{
 		reqWriter: pw,
-		req:       req,
 		resp:      resp,
 	}, nil
 }
 
-func (h *h2Outbound) getRandomTransport() *http.Transport {
-	i := rand.Intn(len(h.transport))
-	if h.transport[i] == nil || (h.aliveTime > 0 && h.tDeadline[i].Before(time.Now())) {
+func (h *h2Outbound) getRandomTransport() *http2.Transport {
+	i := rand.Intn(len(h.h2Transports))
+	if h.h2Transports[i] == nil || (h.aliveTime > 0 && h.tDeadline[i].Before(time.Now())) {
 		h.tMutex[i].Lock()
 		defer h.tMutex[i].Unlock()
-		if h.transport[i] == nil || (h.aliveTime > 0 && h.tDeadline[i].Before(time.Now())) {
-			if h.transport[i] != nil {
-				h.transport[i].CloseIdleConnections()
+		if h.h2Transports[i] == nil || (h.aliveTime > 0 && h.tDeadline[i].Before(time.Now())) {
+			if h.h2Transports[i] != nil {
+				h.h2Transports[i].CloseIdleConnections()
 			}
-			util.Stdout.Println("[h2-debug] creating new client transport of " + strconv.Itoa(i))
-			h.transport[i] = &http.Transport{
-				TLSClientConfig:     h.tlsConfig,
-				ForceAttemptHTTP2:   true,
-				MaxIdleConns:        100,
-				IdleConnTimeout:     config.TcpStreamTimeout,
-				TLSHandshakeTimeout: 10 * time.Second,
+			global.Stdout.Println("[h2-debug] creating new client transport of " + strconv.Itoa(i))
+			h.h2Transports[i] = &http2.Transport{
+				DialTLS: func(_, _ string, _ *tls.Config) (net.Conn, error) {
+					return h.transport.OpenConnection()
+				},
+				MaxFrameSize:    uint32(global.ConnBufSize),
+				IdleConnTimeout: global.TcpStreamTimeout,
 			}
 			if h.aliveTime > 0 {
 				h.tDeadline[i] = time.Now().Add(h.aliveTime)
@@ -155,12 +138,11 @@ func (h *h2Outbound) getRandomTransport() *http.Transport {
 		}
 	}
 
-	return h.transport[i]
+	return h.h2Transports[i]
 }
 
 type h2ConnWrapper struct {
 	reqWriter io.WriteCloser
-	req       *http.Request
 	resp      *http.Response
 }
 
@@ -174,7 +156,6 @@ func (h *h2ConnWrapper) Write(p []byte) (n int, err error) {
 
 func (h *h2ConnWrapper) Close() error {
 	h.reqWriter.Close()
-	h.req.Body.Close()
 	return h.resp.Body.Close()
 }
 
@@ -186,15 +167,15 @@ func (h *h2ConnWrapper) RemoteAddr() net.Addr {
 	return h2Addr{}
 }
 
-func (h *h2ConnWrapper) SetDeadline(t time.Time) error {
+func (h *h2ConnWrapper) SetDeadline(time.Time) error {
 	return nil
 }
 
-func (h *h2ConnWrapper) SetReadDeadline(t time.Time) error {
+func (h *h2ConnWrapper) SetReadDeadline(time.Time) error {
 	return nil
 }
 
-func (h *h2ConnWrapper) SetWriteDeadline(t time.Time) error {
+func (h *h2ConnWrapper) SetWriteDeadline(time.Time) error {
 	return nil
 }
 

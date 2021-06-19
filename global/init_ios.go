@@ -1,6 +1,6 @@
 // +build ios
 
-package config
+package global
 
 /*
 #cgo LDFLAGS: -framework Security -framework CoreFoundation
@@ -42,7 +42,7 @@ import (
 )
 
 func init() {
-	TlsCertVerifier = func(serverName string, certs [][]byte) bool {
+	TLSCertVerifier = func(serverName string, certs [][]byte) bool {
 		if len(certs) == 0 {
 			return false
 		}

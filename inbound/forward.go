@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"errors"
+	"github.com/DeepAQ/mut/router"
 	"net"
 	"net/url"
 )
@@ -10,30 +11,25 @@ var (
 	errNoTarget = errors.New("no target specified")
 )
 
-type forwardInbound struct {
+type forwardProtocol struct {
 	target string
 }
 
-func Forward(u *url.URL) (*forwardInbound, error) {
+func NewForwardProtocol(u *url.URL) *forwardProtocol {
 	target := u.Query().Get("target")
-	if len(target) == 0 {
-		return nil, errNoTarget
-	}
-	return &forwardInbound{
+	return &forwardProtocol{
 		target: target,
-	}, nil
+	}
 }
 
-func (f *forwardInbound) Name() string {
-	return "forward"
+func (f *forwardProtocol) Serve(l net.Listener, r router.Router) error {
+	if len(f.target) == 0 {
+		return errNoTarget
+	}
+	return serveListenerWithConnHandler("forward", l, r, f.ServeConn)
 }
 
-func (f *forwardInbound) ServeConn(conn net.Conn, handleTcpStream StreamHandler) error {
-	handleTcpStream(&TcpStream{
-		Conn:       conn,
-		Protocol:   "forward",
-		ClientAddr: conn.RemoteAddr().String(),
-		TargetAddr: f.target,
-	})
+func (f *forwardProtocol) ServeConn(conn net.Conn, r router.Router) error {
+	r.HandleTcpStream("forward", conn, conn.RemoteAddr().String(), f.target)
 	return nil
 }

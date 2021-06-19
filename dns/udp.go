@@ -3,7 +3,7 @@ package dns
 import (
 	"encoding/binary"
 	"errors"
-	"github.com/DeepAQ/mut/util"
+	"github.com/DeepAQ/mut/global"
 	"math/rand"
 	"net"
 	"strings"
@@ -96,8 +96,8 @@ func (u *udpClient) RoundTrip(req []byte) ([]byte, error) {
 }
 
 func (u *udpClient) readLoop(conn net.Conn) {
-	buf := util.BufPool.Get(udpPacketSize)
-	defer util.BufPool.Put(buf)
+	buf := global.BufPool.Get(udpPacketSize)
+	defer global.BufPool.Put(buf)
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
