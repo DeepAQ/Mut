@@ -20,14 +20,12 @@ var (
 	errCosmicRay = errors.New("this device may be affected by cosmic rays")
 )
 
-type UdpPacketReceiver interface {
-	ReplyUdpPacket(clientAddr, remoteAddr net.Addr, data []byte)
-}
+type UdpPacketReceiver func(remoteAddr net.Addr, data []byte)
 
 type Router interface {
 	DialTcp(targetAddr string) (conn net.Conn, err error, outName, realAddr string)
 	HandleTcpStream(protocolName string, conn net.Conn, clientAddr, targetAddr string)
-	SendUdpPacket(src UdpPacketReceiver, protocol string, clientAddr net.Addr, targetAddr string, data []byte)
+	SendUdpPacket(protocolName string, clientAddr, targetAddr string, data []byte, receiver UdpPacketReceiver)
 }
 
 type Action uint8
@@ -171,18 +169,18 @@ func (r *router) HandleTcpStream(protocolName string, conn net.Conn, clientAddr,
 	global.Stdout.Println("[" + protocolName + "] " + clientAddr + " >-" + outName + "-< " + realAddr)
 }
 
-func (r *router) SendUdpPacket(src UdpPacketReceiver, protocol string, clientAddr net.Addr, targetAddr string, data []byte) {
+func (r *router) SendUdpPacket(protocolName string, clientAddr, targetAddr string, data []byte, receiver UdpPacketReceiver) {
 	host, port, ip := r.resolveRealAddr(targetAddr)
 	if ip == nil {
 		var err error
 		if ip, err = r.resolver.Lookup(host); err != nil {
-			global.Stderr.Println("[" + protocol + "] failed to resolve host: " + err.Error())
+			global.Stderr.Println("[" + protocolName + "-udp] failed to resolve host: " + err.Error())
 			return
 		}
 	}
 	portInt, err := strconv.Atoi(port)
 	if err != nil {
-		global.Stderr.Println("[" + protocol + "] invalid port: " + port)
+		global.Stderr.Println("[" + protocolName + "-udp] invalid port: " + port)
 		return
 	}
 	dAddr := &net.UDPAddr{
@@ -191,16 +189,16 @@ func (r *router) SendUdpPacket(src UdpPacketReceiver, protocol string, clientAdd
 		Zone: "",
 	}
 
-	natKey := clientAddr.String()
+	natKey := clientAddr
 	var cConn net.PacketConn
 	if conn, ok := r.udpNatMap.Load(natKey); !ok {
 		conn, err := net.ListenPacket("udp", "")
 		if err != nil {
-			global.Stderr.Println("[" + protocol + "] failed to open connection: " + err.Error())
+			global.Stderr.Println("[" + protocolName + "-udp] failed to open connection: " + err.Error())
 			return
 		}
-		global.Stdout.Println("[" + protocol + "] " + natKey + " <-> " + conn.LocalAddr().String())
-		go r.udpReadLoop(src, protocol, clientAddr, conn)
+		global.Stdout.Println("[" + protocolName + "-udp] " + natKey + " <-> " + conn.LocalAddr().String())
+		go r.udpReadLoop(protocolName, clientAddr, conn, receiver)
 		r.udpNatMap.Store(natKey, conn)
 		cConn = conn
 	} else {
@@ -209,11 +207,11 @@ func (r *router) SendUdpPacket(src UdpPacketReceiver, protocol string, clientAdd
 
 	cConn.SetDeadline(time.Now().Add(global.UdpStreamTimeout))
 	if _, err := cConn.WriteTo(data, dAddr); err != nil {
-		global.Stderr.Println("[" + protocol + "] " + err.Error())
+		global.Stderr.Println("[" + protocolName + "-udp] " + err.Error())
 	}
 }
 
-func (r *router) udpReadLoop(src UdpPacketReceiver, protocol string, clientAddr net.Addr, lConn net.PacketConn) {
+func (r *router) udpReadLoop(protocol string, natKey string, lConn net.PacketConn, receiver UdpPacketReceiver) {
 	buf := global.BufPool.Get(global.UdpMaxLength)
 	defer global.BufPool.Put(buf)
 
@@ -223,11 +221,10 @@ func (r *router) udpReadLoop(src UdpPacketReceiver, protocol string, clientAddr 
 		if err != nil {
 			break
 		}
-		src.ReplyUdpPacket(clientAddr, addr, buf[:n])
+		receiver(addr, buf[:n])
 	}
 
-	natKey := clientAddr.String()
-	global.Stdout.Println("[" + protocol + "] " + natKey + " >-< " + lConn.LocalAddr().String())
+	global.Stdout.Println("[" + protocol + "-udp] " + natKey + " >-< " + lConn.LocalAddr().String())
 	r.udpNatMap.Delete(natKey)
 	lConn.Close()
 }

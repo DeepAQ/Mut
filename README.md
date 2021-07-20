@@ -81,6 +81,16 @@ Receives both HTTP/1.1 and SOCKS5 requests. The underlying protocol is automatic
 
 Options: same as `socks` protocol.
 
+#### `tun` protocol (Linux/macOS)
+
+Processes TCP/UDP/ICMP connections from a tun device. `tun` inbound can be initialized using:
+- device name: `tun://tun<number>` (Linux) or `tun://utun<number>` (macOS)
+- file descriptor: `tun://?fd=<fd>` (Linux/macOS)
+- fd received from unix socket: `tun://?fdpath=<socket path>` (Android)
+
+Options:
+- `mtu`: Override the default mtu (1500) of tun device.
+
 ### Outbound protocols
 
 #### `direct` protocol

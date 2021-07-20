@@ -19,15 +19,30 @@ import (
 
 var (
 	stdinFlag = flag.Bool("stdin", false, "receive other arguments from stdin")
-	inFlag    = flag.String("in", "", "inbound config, scheme://[username:password@]host:port[/?option=value...]")
+	inFlags   multipleStringFlag
 	outFlag   = flag.String("out", "", "outbound config, scheme://[username:password@]host:port[/?option=value...]")
 	dnsFlag   = flag.String("dns", "", "dns config, protocol://host:port[/path...]")
 	rulesFlag = flag.String("rules", "", "router rules, rule1:action1[;rule2:action2...][;final:action]")
 	debugFlag = flag.Int("debug", 0, "localhost debug port")
 )
 
+func init() {
+	flag.Var(&inFlags, "in", "inbound config, scheme://[username:password@]host:port[/?option=value...]")
+}
+
+type multipleStringFlag []string
+
+func (m *multipleStringFlag) String() string {
+	return fmt.Sprint(*m)
+}
+
+func (m *multipleStringFlag) Set(s string) error {
+	*m = append(*m, s)
+	return nil
+}
+
 type instance struct {
-	inbound   inbound.Inbound
+	inbounds  []inbound.Inbound
 	router    router.Router
 	resolver  dns.Resolver
 	debugPort int
@@ -44,16 +59,19 @@ func newInstance(args []string) (*instance, error) {
 
 	var err error
 	instance := &instance{
+		inbounds:  make([]inbound.Inbound, len(inFlags)),
 		debugPort: *debugFlag,
 	}
 
-	inUrl, err := url.Parse(*inFlag)
-	if err != nil {
-		return nil, errors.New("failed to parse inbound config: " + err.Error())
-	}
-	instance.inbound, err = inbound.CreateInbound(inUrl)
-	if err != nil {
-		return nil, errors.New("failed to initialize inbound: " + err.Error())
+	for i, inFlag := range inFlags {
+		inUrl, err := url.Parse(inFlag)
+		if err != nil {
+			return nil, errors.New("failed to parse inbound config: " + err.Error())
+		}
+		instance.inbounds[i], err = inbound.CreateInbound(inUrl)
+		if err != nil {
+			return nil, errors.New("failed to initialize inbound: " + err.Error())
+		}
 	}
 
 	instance.resolver = dns.System
@@ -93,12 +111,15 @@ func (i *instance) Run() {
 	i.resolver.Start()
 
 	wg := sync.WaitGroup{}
-	wg.Add(1)
-	go func() {
-		if err := i.inbound.Serve(i.router); err != nil {
-			global.Stderr.Println("[" + i.inbound.Name() + "] failed to serve: " + err.Error())
-		}
-		wg.Done()
-	}()
+	wg.Add(len(i.inbounds))
+	for _, in := range i.inbounds {
+		in := in
+		go func() {
+			if err := in.Serve(i.router); err != nil {
+				global.Stderr.Println("[" + in.Name() + "] failed to serve: " + err.Error())
+			}
+			wg.Done()
+		}()
+	}
 	wg.Wait()
 }

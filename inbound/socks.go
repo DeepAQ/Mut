@@ -219,29 +219,31 @@ func (s *socksProtocol) startUdpGw(r router.Router) {
 				continue
 			}
 
-			r.SendUdpPacket(s, "socks-udp", cAddr, addrAndPort, buf[off:n])
+			r.SendUdpPacket("socks", cAddr.String(), addrAndPort, buf[off:n], s.getUdpPacketReceiver(cAddr))
 		}
 	}()
 }
 
-func (s *socksProtocol) ReplyUdpPacket(clientAddr, remoteAddr net.Addr, data []byte) {
-	buf := global.BufPool.Get(len(data) + 10)
-	defer global.BufPool.Put(buf)
+func (s *socksProtocol) getUdpPacketReceiver(clientAddr net.Addr) router.UdpPacketReceiver {
+	return func(remoteAddr net.Addr, data []byte) {
+		buf := global.BufPool.Get(len(data) + 10)
+		defer global.BufPool.Put(buf)
 
-	buf[0] = 0
-	buf[1] = 0
-	buf[2] = 0
-	buf[3] = 0x01
-	rAddr := remoteAddr.(*net.UDPAddr)
-	ip4 := rAddr.IP.To4()
-	if ip4 == nil {
-		return
+		buf[0] = 0
+		buf[1] = 0
+		buf[2] = 0
+		buf[3] = 0x01
+		rAddr := remoteAddr.(*net.UDPAddr)
+		ip4 := rAddr.IP.To4()
+		if ip4 == nil {
+			return
+		}
+		copy(buf[4:8], ip4)
+		binary.BigEndian.PutUint16(buf[8:10], uint16(rAddr.Port))
+		copy(buf[10:], data)
+
+		s.udpConn.WriteTo(buf, clientAddr)
 	}
-	copy(buf[4:8], ip4)
-	binary.BigEndian.PutUint16(buf[8:10], uint16(rAddr.Port))
-	copy(buf[10:], data)
-
-	s.udpConn.WriteTo(buf, clientAddr)
 }
 
 func readLengthAndString(r *bufio.Reader, minLength, maxLength byte) (string, error) {

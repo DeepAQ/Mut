@@ -16,8 +16,8 @@ type BufferPool interface {
 }
 
 type defaultBufPool struct {
-	minExp int
-	maxExp int
+	minExp uint8
+	maxExp uint8
 	bufs   []sync.Pool
 }
 
@@ -30,7 +30,7 @@ func NewBufPool(minSize, maxSize uint32) *defaultBufPool {
 		bufs:   make([]sync.Pool, maxExp-minExp+1),
 	}
 	for i := range bp.bufs {
-		size := 1 << (minExp + i)
+		size := 1 << (minExp + uint8(i))
 		bp.bufs[i].New = func() interface{} {
 			return make([]byte, size)
 		}
@@ -38,11 +38,12 @@ func NewBufPool(minSize, maxSize uint32) *defaultBufPool {
 	return bp
 }
 
-func log2(x uint32) int {
-	var multiplyDeBruijnBitPosition = [32]int{
-		0, 9, 1, 10, 13, 21, 2, 29, 11, 14, 16, 18, 22, 25, 3, 30,
-		8, 12, 20, 28, 15, 17, 24, 7, 19, 27, 23, 6, 26, 5, 4, 31,
-	}
+var multiplyDeBruijnBitPosition = [32]uint8{
+	0, 9, 1, 10, 13, 21, 2, 29, 11, 14, 16, 18, 22, 25, 3, 30,
+	8, 12, 20, 28, 15, 17, 24, 7, 19, 27, 23, 6, 26, 5, 4, 31,
+}
+
+func log2(x uint32) uint8 {
 	v := x
 	v |= v >> 1
 	v |= v >> 2

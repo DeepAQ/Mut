@@ -53,6 +53,8 @@ func CreateInbound(u *url.URL) (Inbound, error) {
 		return NewTcpInbound(u, NewMixProtocol(u), tp)
 	case "forward":
 		return NewTcpInbound(u, NewForwardProtocol(u), tp)
+	case "tun":
+		return NewTunInbound(u)
 	default:
 		return nil, errors.New("unsupported inbound protocol " + protocol)
 	}
