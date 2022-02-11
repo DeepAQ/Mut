@@ -39,6 +39,7 @@ Options:
 - `key`: (inbound only) path to a base64-encoded private key file
 - `host`: (optional, outbound only) overrides the SNI server name. If not specified, the outbound hostname will be used as server name.
 - `alpn`: (optional, outbound only) comma-seperated Application-Layer Protocol Negotiation values.
+- `public_key`: (optional, outbound only) use server certificate public key instead of CA to verify identity
 
 #### `mux` transport
 
@@ -86,7 +87,7 @@ Options: same as `socks` protocol.
 Processes TCP/UDP/ICMP connections from a tun device. `tun` inbound can be initialized using:
 - device name: `tun://tun<number>` (Linux) or `tun://utun<number>` (macOS)
 - file descriptor: `tun://?fd=<fd>` (Linux/macOS)
-- fd received from unix socket: `tun://?fdpath=<socket path>` (Android)
+- fd received from unix socket: `tun://?fdpath=<socket path>` (Linux/macOS)
 
 Options:
 - `mtu`: Override the default mtu (1500) of tun device.

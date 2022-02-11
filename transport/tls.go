@@ -1,13 +1,22 @@
 package transport
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/asn1"
+	"encoding/hex"
 	"errors"
 	"github.com/DeepAQ/mut/global"
 	"net"
 	"net/url"
+	"reflect"
 	"strings"
+	"time"
 )
 
 const (
@@ -16,6 +25,8 @@ const (
 
 var (
 	errCertNotTrusted = errors.New("server certificate is not trusted")
+	errNoCert         = errors.New("no certificate presented by server")
+	errCertInvalid    = errors.New("server certificate exceeds validity bounds")
 )
 
 type TLSTransport interface {
@@ -96,7 +107,51 @@ func NewTLSOutboundTransport(u *url.URL, inner OutboundTransport) (*tlsOutboundT
 	if len(alpn) > 0 {
 		tlsConfig.NextProtos = strings.Split(alpn, ",")
 	}
-	if global.TLSCertVerifier != nil {
+	publicKey := u.Query().Get("public_key")
+	if len(publicKey) > 0 {
+		publicKeyBytes, err := hex.DecodeString(publicKey)
+		if err != nil {
+			return nil, err
+		}
+
+		tlsConfig.InsecureSkipVerify = true
+		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return errNoCert
+			}
+			cert, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return err
+			}
+			now := time.Now()
+			if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+				return errCertInvalid
+			}
+			if err := cert.VerifyHostname(serverName); err != nil {
+				return err
+			}
+
+			var certPublicKeyBytes []byte
+			switch pub := cert.PublicKey.(type) {
+			case *rsa.PublicKey:
+				certPublicKeyBytes, err = asn1.Marshal(pub)
+				if err != nil {
+					return err
+				}
+			case *ecdsa.PublicKey:
+				certPublicKeyBytes = elliptic.Marshal(pub.Curve, pub.X, pub.Y)
+			case ed25519.PublicKey:
+				certPublicKeyBytes = pub
+			default:
+				return errors.New("unknown public key type: " + reflect.TypeOf(pub).String())
+			}
+
+			if bytes.Compare(publicKeyBytes, certPublicKeyBytes) != 0 {
+				return errors.New("server certificate public key validation failed, received public key: " + hex.EncodeToString(certPublicKeyBytes))
+			}
+			return nil
+		}
+	} else if global.TLSCertVerifier != nil {
 		tlsConfig.InsecureSkipVerify = true
 		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			if !global.TLSCertVerifier(serverName, rawCerts) {

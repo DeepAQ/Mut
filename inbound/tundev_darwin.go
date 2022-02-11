@@ -1,3 +1,4 @@
+//go:build darwin && !ios
 // +build darwin,!ios
 
 package inbound
@@ -17,26 +18,30 @@ import (
 	"strings"
 )
 
+var (
+	errIncorrectFormat = errors.New("tun device name must start with 'utun'")
+	errIncorrectName   = errors.New("incorrect tun device name")
+)
+
 func newTunInboundWithDevice(u *url.URL) (*tunInbound, error) {
-	tag := u.Query().Get("fd")
-	fd, err := strconv.Atoi(tag)
-	if err != nil {
-		tag = u.Host
-		if !strings.HasPrefix(tag, "utun") {
-			return nil, errors.New("tun device name must start with 'utun'")
-		}
-
-		id, err := strconv.Atoi(tag[4:])
-		if err != nil {
-			return nil, errors.New("incorrect tun device name")
-		}
-
-		fd, err = openTunDevice(id)
-		if err != nil {
-			return nil, errors.New("failed to open tun device " + tag + ": " + err.Error())
-		}
+	if !strings.HasPrefix(u.Host, "utun") {
+		return nil, errIncorrectFormat
 	}
 
+	id, err := strconv.Atoi(u.Host[4:])
+	if err != nil {
+		return nil, errIncorrectName
+	}
+
+	fd, err := openTunDevice(id)
+	if err != nil {
+		return nil, errors.New("failed to open tun device " + u.Host + ": " + err.Error())
+	}
+
+	return newTunInboundWithFD(u, fd, u.Host)
+}
+
+func newTunInboundWithFD(u *url.URL, fd int, tag string) (*tunInbound, error) {
 	mtu, _ := strconv.Atoi(u.Query().Get("mtu"))
 	if mtu <= 0 {
 		mtu = defaultMtu
@@ -54,9 +59,10 @@ func openTunDevice(id int) (int, error) {
 		return -1, err
 	}
 
-	var ctlInfo unix.CtlInfo
+	ctlInfo := unix.CtlInfo{}
 	copy(ctlInfo.Name[:], "com.apple.net.utun_control")
 	if err := unix.IoctlCtlInfo(fd, &ctlInfo); err != nil {
+		_ = unix.Close(fd)
 		return -1, err
 	}
 
@@ -64,10 +70,12 @@ func openTunDevice(id int) (int, error) {
 		ID:   ctlInfo.Id,
 		Unit: uint32(id) + 1,
 	}); err != nil {
+		_ = unix.Close(fd)
 		return -1, err
 	}
 
 	if err := unix.SetNonblock(fd, true); err != nil {
+		_ = unix.Close(fd)
 		return -1, err
 	}
 	return fd, nil
@@ -145,6 +153,10 @@ func (ep *tunLinkEndpoint) WritePackets(_ stack.RouteInfo, pkts stack.PacketBuff
 		n++
 	}
 	return n, nil
+}
+
+func (ep *tunLinkEndpoint) WriteRawPacket(pkt *stack.PacketBuffer) tcpip.Error {
+	return ep.writePacketInternal(pkt)
 }
 
 func (ep *tunLinkEndpoint) writePacketInternal(pkt *stack.PacketBuffer) tcpip.Error {

@@ -1,3 +1,4 @@
+//go:build ios
 // +build ios
 
 package global
@@ -5,52 +6,67 @@ package global
 /*
 #cgo LDFLAGS: -framework Security -framework CoreFoundation
 
+#include <stdlib.h>
+#include <os/log.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
 
-int verifyTrust(char *hostname, void *cert, long certLen) {
-	CFStringRef hostnameStr = CFStringCreateWithCStringNoCopy(NULL, hostname, kCFStringEncodingUTF8, NULL);
-    SecPolicyRef policy = SecPolicyCreateSSL(true, hostnameStr);
-	CFDataRef certData = CFDataCreateWithBytesNoCopy(NULL, cert, certLen, NULL);
-	SecCertificateRef certificate = SecCertificateCreateWithData(NULL, certData);
+void printLog(_GoString_ str) {
+	os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_INFO, "%{public}.*s", str.n, str.p);
+}
+
+void printErrorLog(_GoString_ str) {
+	os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_ERROR, "%{public}.*s", str.n, str.p);
+}
+
+int verifyTrust(_GoString_ hostname, _GoString_ cert) {
+	CFStringRef hostnameStr = CFStringCreateWithBytesNoCopy(kCFAllocatorDefault, hostname.p, hostname.n, kCFStringEncodingUTF8, false, kCFAllocatorNull);
+	SecPolicyRef policy = SecPolicyCreateSSL(true, hostnameStr);
+	CFDataRef certData = CFDataCreateWithBytesNoCopy(kCFAllocatorDefault, cert.p, cert.n, kCFAllocatorNull);
+	SecCertificateRef certificate = SecCertificateCreateWithData(kCFAllocatorDefault, certData);
 	int result = 0;
 	SecTrustRef trust;
 	if (SecTrustCreateWithCertificates(certificate, policy, &trust) == errSecSuccess) {
-		SecTrustResultType secResult;
-		if (SecTrustEvaluate(trust, &secResult) == errSecSuccess) {
-			if (secResult == kSecTrustResultUnspecified || secResult == kSecTrustResultProceed) {
-				result = 1;
-			}
+		if (SecTrustEvaluateWithError(trust, NULL)) {
+			result = 1;
 		}
 	}
-	if (trust) {
-		CFRelease(trust);
-	}
-	if (certificate)  {
-		CFRelease(certificate);
-	}
-	if (policy)  {
-		CFRelease(policy);
-	}
+	if (trust) CFRelease(trust);
+	if (certificate) CFRelease(certificate);
+	if (certData) CFRelease(certData);
+	if (policy) CFRelease(policy);
+	if (hostnameStr) CFRelease(hostnameStr);
 	return result;
 }
 */
 import "C"
 
 import (
+	"log"
 	"unsafe"
 )
 
+type iosLogWriter struct{}
+
+func (iosLogWriter) Write(p []byte) (n int, err error) {
+	C.printLog(*(*string)(unsafe.Pointer(&p)))
+	return len(p), nil
+}
+
+type iosErrorLogWriter struct{}
+
+func (iosErrorLogWriter) Write(p []byte) (n int, err error) {
+	C.printErrorLog(*(*string)(unsafe.Pointer(&p)))
+	return len(p), nil
+}
+
 func init() {
+	Stdout = log.New(&iosLogWriter{}, "", log.LstdFlags)
+	Stderr = log.New(&iosErrorLogWriter{}, "", log.LstdFlags)
 	TLSCertVerifier = func(serverName string, certs [][]byte) bool {
 		if len(certs) == 0 {
 			return false
 		}
-
-		serverNameStr := C.CString(serverName)
-		defer C.free(unsafe.Pointer(serverNameStr))
-		certBytes := C.CBytes(certs[0])
-		defer C.free(certBytes)
-		return C.verifyTrust(serverNameStr, certBytes, C.long(len(certs[0]))) > 0
+		return C.verifyTrust(serverName, *(*string)(unsafe.Pointer(&certs[0]))) > 0
 	}
 }

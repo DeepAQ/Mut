@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 package inbound
@@ -11,17 +12,12 @@ import (
 )
 
 func newTunInboundWithDevice(u *url.URL) (*tunInbound, error) {
-	tag := u.Query().Get("fd")
-	fd, err := strconv.Atoi(tag)
+	fd, err := tun.Open(u.Host)
 	if err != nil {
-		tag = u.Host
-		fd, err = tun.Open(tag)
-		if err != nil {
-			return nil, errors.New("failed to open tun device " + tag + ": " + err.Error())
-		}
+		return nil, errors.New("failed to open tun device " + u.Host + ": " + err.Error())
 	}
 
-	return newTunInboundWithFD(u, fd, tag)
+	return newTunInboundWithFD(u, fd, u.Host)
 }
 
 func newTunInboundWithFD(u *url.URL, fd int, tag string) (*tunInbound, error) {

@@ -1,3 +1,4 @@
+//go:build linux || (darwin && !ios)
 // +build linux darwin,!ios
 
 package inbound

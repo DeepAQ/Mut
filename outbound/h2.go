@@ -93,11 +93,7 @@ func (h *h2Outbound) DialTcp(targetAddr string) (net.Conn, error) {
 		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(h.username+":"+h.password)))
 	}
 
-	timeOut := time.AfterFunc(Http2RequestTimeOut, func() {
-		pr.Close()
-	})
 	resp, err := h.getRandomTransport().RoundTrip(req)
-	timeOut.Stop()
 	if err != nil {
 		req.Body.Close()
 		pw.Close()

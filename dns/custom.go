@@ -16,8 +16,8 @@ import (
 
 const (
 	maxTTL       = 3600
-	fakeIpTTL    = 10
-	fakeIpExpire = 30 * time.Second
+	fakeIpTTL    = 60
+	fakeIpExpire = 5 * time.Minute
 )
 
 var (
@@ -47,7 +47,7 @@ type customResolver struct {
 	fakeIpMask   int
 	fakeIpMu     sync.Mutex
 	fakeIpCurr   uint32
-	fakeIpToHost map[uint32]fakeIpEntry
+	fakeIpToHost map[uint32]*fakeIpEntry
 	hostToFakeIp map[string]uint32
 }
 
@@ -101,6 +101,7 @@ func (r *customResolver) ResolveFakeIP(ip net.IP) string {
 				r.fakeIpMu.Lock()
 				defer r.fakeIpMu.Unlock()
 				if v, ok := r.fakeIpToHost[ipInt]; ok {
+					v.expire = time.Now().Add(fakeIpExpire)
 					return v.host
 				}
 			}
@@ -197,7 +198,7 @@ func (r *customResolver) listenLocal() {
 		// temp: use 198.18.0.0/16 as fake ip range
 		r.fakeIpPrefix = 198<<24 + 18<<16
 		r.fakeIpMask = 16
-		r.fakeIpToHost = map[uint32]fakeIpEntry{}
+		r.fakeIpToHost = map[uint32]*fakeIpEntry{}
 		r.hostToFakeIp = map[string]uint32{}
 	}
 
@@ -248,10 +249,12 @@ func (r *customResolver) listenLocal() {
 								}
 							}
 							r.hostToFakeIp[fakeIpHostname] = fip
-						}
-						r.fakeIpToHost[fip] = fakeIpEntry{
-							host:   fakeIpHostname,
-							expire: time.Now().Add(fakeIpExpire),
+							r.fakeIpToHost[fip] = &fakeIpEntry{
+								host:   fakeIpHostname,
+								expire: time.Now().Add(fakeIpExpire),
+							}
+						} else {
+							r.fakeIpToHost[fip].expire = time.Now().Add(fakeIpExpire)
 						}
 						r.fakeIpMu.Unlock()
 						resp, err = ipv4AnswerToWire(reqHeader, reqQuestion, fip, fakeIpTTL, respBuf)
