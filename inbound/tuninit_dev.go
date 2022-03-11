@@ -1,5 +1,5 @@
-//go:build linux || (darwin && !ios)
-// +build linux darwin,!ios
+//go:build linux || darwin
+// +build linux darwin
 
 package inbound
 

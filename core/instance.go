@@ -20,7 +20,7 @@ import (
 var (
 	stdinFlag = flag.Bool("stdin", false, "receive other arguments from stdin")
 	inFlags   multipleStringFlag
-	outFlag   = flag.String("out", "", "outbound config, scheme://[username:password@]host:port[/?option=value...]")
+	outFlags  multipleStringFlag
 	dnsFlag   = flag.String("dns", "", "dns config, protocol://host:port[/path...]")
 	rulesFlag = flag.String("rules", "", "router rules, rule1:action1[;rule2:action2...][;final:action]")
 	debugFlag = flag.Int("debug", 0, "localhost debug port")
@@ -28,6 +28,7 @@ var (
 
 func init() {
 	flag.Var(&inFlags, "in", "inbound config, scheme://[username:password@]host:port[/?option=value...]")
+	flag.Var(&outFlags, "out", "outbound config, [tag:]scheme://[username:password@]host:port[/?option=value...]")
 }
 
 type multipleStringFlag []string
@@ -87,16 +88,34 @@ func newInstance(args []string) (*instance, error) {
 	}
 	debug.Dns = instance.resolver
 
-	outUrl, err := url.Parse(*outFlag)
-	if err != nil {
-		return nil, errors.New("failed to parse outbound config: " + err.Error())
-	}
-	out, err := outbound.CreateOutbound(outUrl, instance.resolver)
-	if err != nil {
-		return nil, errors.New("failed to initialize outbound: " + err.Error())
+	outbounds := map[string]outbound.Outbound{}
+	for _, outFlag := range outFlags {
+		schemeIndex := strings.Index(outFlag, "://")
+		if schemeIndex < 0 {
+			return nil, errors.New("invalid outbound config: " + outFlag)
+		}
+		outTag := "default"
+		tagIndex := strings.IndexByte(outFlag, ':')
+		if tagIndex < schemeIndex {
+			outTag = outFlag[:tagIndex]
+			outFlag = outFlag[tagIndex+1:]
+		}
+		if _, ok := outbounds[outTag]; ok {
+			return nil, errors.New("duplicated outbound tag: " + outTag)
+		}
+
+		outUrl, err := url.Parse(outFlag)
+		if err != nil {
+			return nil, errors.New("failed to parse outbound config: " + err.Error())
+		}
+		out, err := outbound.CreateOutbound(outUrl, instance.resolver)
+		if err != nil {
+			return nil, errors.New("failed to initialize outbound: " + err.Error())
+		}
+		outbounds[outTag] = out
 	}
 
-	instance.router, err = router.NewRouter(*rulesFlag, instance.resolver, out)
+	instance.router, err = router.NewRouter(*rulesFlag, instance.resolver, outbounds)
 	if err != nil {
 		return nil, errors.New("failed to initialize router: " + err.Error())
 	}

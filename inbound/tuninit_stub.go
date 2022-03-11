@@ -1,6 +1,5 @@
-//go:build !linux && (!darwin || ios)
-// +build !linux
-// +build !darwin ios
+//go:build !linux && !darwin
+// +build !linux,!darwin
 
 package inbound
 
@@ -10,7 +9,7 @@ import (
 )
 
 var (
-	errTunNotSupported = errors.New("tun inbound is only supported on linux and macos")
+	errTunNotSupported = errors.New("tun inbound is only supported on linux and darwin")
 )
 
 func NewTunInbound(_ *url.URL) (Inbound, error) {

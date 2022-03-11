@@ -11,6 +11,7 @@ import (
 
 type Outbound interface {
 	Name() string
+	RemoteDNS() bool
 	DialTcp(targetAddr string) (net.Conn, error)
 }
 

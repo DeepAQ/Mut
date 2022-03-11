@@ -16,8 +16,7 @@ import (
 )
 
 var (
-	errRejected  = errors.New("rejected")
-	errCosmicRay = errors.New("this device may be affected by cosmic rays")
+	errRejected = errors.New("rejected")
 )
 
 type UdpPacketReceiver func(remoteAddr net.Addr, data []byte)
@@ -28,95 +27,88 @@ type Router interface {
 	SendUdpPacket(protocolName string, clientAddr, targetAddr string, data []byte, receiver UdpPacketReceiver)
 }
 
-type Action uint8
-
-var (
-	ActionDirect  Action = 0
-	ActionDefault Action = 1
-	ActionReject  Action = 2
-)
-
-type ruleAction struct {
+type routerRule struct {
 	rule   Rule
-	action Action
+	outTag string
 }
 
 type router struct {
-	ruleSet     []*ruleAction
-	finalAction Action
-	resolver    dns.Resolver
-	defaultOut  outbound.Outbound
-	directOut   outbound.Outbound
-	udpNatMap   sync.Map //map[string]net.PacketConn
+	outbounds map[string]outbound.Outbound
+	ruleSet   []*routerRule
+	finalOut  string
+	resolver  dns.Resolver
+	udpNatMap sync.Map //map[string]net.PacketConn
 }
 
-func NewRouter(conf string, resolver dns.Resolver, defaultOut outbound.Outbound) (*router, error) {
-	ruleSet := make([]*ruleAction, 0)
-	finalAction := ActionDefault
+func NewRouter(conf string, resolver dns.Resolver, outbounds map[string]outbound.Outbound) (*router, error) {
+	if _, ok := outbounds["default"]; !ok {
+		outbounds["default"] = outbound.NewDirectOutbound(resolver)
+	}
+	if _, ok := outbounds["direct"]; !ok {
+		outbounds["direct"] = outbound.NewDirectOutbound(resolver)
+	}
+
+	ruleSet := make([]*routerRule, 0)
+	finalOut := "default"
 	for _, rule := range strings.Split(conf, ";") {
 		if len(rule) == 0 {
 			continue
 		}
 
 		s := strings.IndexByte(rule, ',')
-		var action Action
-		switch rule[s+1:] {
-		case "direct":
-			action = ActionDirect
-		case "default":
-			action = ActionDefault
-		case "reject":
-			action = ActionReject
-		default:
-			return nil, errors.New("unsupported action: " + rule[s+1:])
+		outTag := rule[s+1:]
+		if outTag != "reject" {
+			if _, ok := outbounds[outTag]; !ok {
+				return nil, errors.New("unknown outbound tag: " + outTag)
+			}
 		}
 
-		r := rule[:s]
-		if strings.HasPrefix(r, "domains:") {
-			lines, err := readLinesFromFile(r[8:])
+		ruleStr := rule[:s]
+		if strings.HasPrefix(ruleStr, "domains:") {
+			lines, err := readLinesFromFile(ruleStr[8:])
 			if err != nil {
 				return nil, err
 			}
-			ruleSet = append(ruleSet, &ruleAction{
+			ruleSet = append(ruleSet, &routerRule{
 				rule:   NewDomainRule(lines),
-				action: action,
+				outTag: outTag,
 			})
-		} else if strings.HasPrefix(r, "cidr:") {
-			lines, err := readLinesFromFile(r[5:])
+		} else if strings.HasPrefix(ruleStr, "cidr:") {
+			lines, err := readLinesFromFile(ruleStr[5:])
 			if err != nil {
 				return nil, err
 			}
-			ruleSet = append(ruleSet, &ruleAction{
+			ruleSet = append(ruleSet, &routerRule{
 				rule:   NewCIDRRule(lines),
-				action: action,
+				outTag: outTag,
 			})
-		} else if r == "final" {
-			finalAction = action
+		} else if ruleStr == "final" {
+			finalOut = outTag
 		} else {
 			return nil, errors.New("unsupported rule definition: " + rule[:s])
 		}
 	}
+
 	return &router{
-		ruleSet:     ruleSet,
-		finalAction: finalAction,
-		resolver:    resolver,
-		defaultOut:  defaultOut,
-		directOut:   outbound.NewDirectOutbound(resolver),
+		outbounds: outbounds,
+		ruleSet:   ruleSet,
+		finalOut:  finalOut,
+		resolver:  resolver,
 	}, nil
 }
 
-func (r *router) DialTcp(targetAddr string) (conn net.Conn, err error, outName, realAddr string) {
+func (r *router) DialTcp(targetAddr string) (conn net.Conn, err error, outTag, realAddr string) {
 	host, port, ip := r.resolveRealAddr(targetAddr)
 	realAddr = host + ":" + port
 	resolved := ip != nil
 
-	action := r.finalAction
+	outTag = r.finalOut
 	for _, rs := range r.ruleSet {
 		if rs.rule.NeedsIP() {
 			if !resolved {
 				resolved = true
 				if ip, err = r.resolver.Lookup(host); err != nil {
-					global.Stderr.Println("[router] failed to resolve host: " + err.Error())
+					global.Stderr.Println("[router] failed to resolve " + host + ": " + err.Error())
 				}
 			}
 			if ip == nil {
@@ -124,25 +116,21 @@ func (r *router) DialTcp(targetAddr string) (conn net.Conn, err error, outName, 
 			}
 		}
 		if rs.rule.Matches(host, ip) {
-			action = rs.action
+			outTag = rs.outTag
 			break
 		}
 	}
 
-	switch action {
-	case ActionReject:
+	switch outTag {
+	case "reject":
 		err = errRejected
-	case ActionDirect:
-		if ip != nil {
-			targetAddr = ip.String() + ":" + port
-		}
-		conn, err = r.directOut.DialTcp(targetAddr)
-		outName = r.directOut.Name()
-	case ActionDefault:
-		conn, err = r.defaultOut.DialTcp(realAddr)
-		outName = r.defaultOut.Name()
 	default:
-		err = errCosmicRay
+		out := r.outbounds[outTag]
+		if ip != nil && !out.RemoteDNS() {
+			conn, err = out.DialTcp(ip.String() + ":" + port)
+		} else {
+			conn, err = out.DialTcp(realAddr)
+		}
 	}
 	return
 }
@@ -169,7 +157,7 @@ func (r *router) HandleTcpStream(protocolName string, conn net.Conn, clientAddr,
 	global.Stdout.Println("[" + protocolName + "] " + clientAddr + " >-" + outName + "-< " + realAddr)
 }
 
-func (r *router) SendUdpPacket(protocolName string, clientAddr, targetAddr string, data []byte, receiver UdpPacketReceiver) {
+func (r *router) SendUdpPacket(protocolName, natKey, targetAddr string, data []byte, receiver UdpPacketReceiver) {
 	host, port, ip := r.resolveRealAddr(targetAddr)
 	if ip == nil {
 		var err error
@@ -189,7 +177,6 @@ func (r *router) SendUdpPacket(protocolName string, clientAddr, targetAddr strin
 		Zone: "",
 	}
 
-	natKey := clientAddr
 	var cConn net.PacketConn
 	if conn, ok := r.udpNatMap.Load(natKey); !ok {
 		conn, err := net.ListenPacket("udp", "")
@@ -197,8 +184,8 @@ func (r *router) SendUdpPacket(protocolName string, clientAddr, targetAddr strin
 			global.Stderr.Println("[" + protocolName + "-udp] failed to open connection: " + err.Error())
 			return
 		}
-		global.Stdout.Println("[" + protocolName + "-udp] " + natKey + " <-> " + conn.LocalAddr().String())
-		go r.udpReadLoop(protocolName, clientAddr, conn, receiver)
+		global.Stdout.Println("[" + protocolName + "-udp] " + natKey + " <-> " + conn.LocalAddr().String() + " -> " + targetAddr)
+		go r.udpReadLoop(protocolName, natKey, conn, receiver)
 		r.udpNatMap.Store(natKey, conn)
 		cConn = conn
 	} else {
@@ -211,7 +198,7 @@ func (r *router) SendUdpPacket(protocolName string, clientAddr, targetAddr strin
 	}
 }
 
-func (r *router) udpReadLoop(protocol string, natKey string, lConn net.PacketConn, receiver UdpPacketReceiver) {
+func (r *router) udpReadLoop(protocolName, natKey string, lConn net.PacketConn, receiver UdpPacketReceiver) {
 	buf := global.BufPool.Get(global.UdpMaxLength)
 	defer global.BufPool.Put(buf)
 
@@ -224,7 +211,7 @@ func (r *router) udpReadLoop(protocol string, natKey string, lConn net.PacketCon
 		receiver(addr, buf[:n])
 	}
 
-	global.Stdout.Println("[" + protocol + "-udp] " + natKey + " >-< " + lConn.LocalAddr().String())
+	global.Stdout.Println("[" + protocolName + "-udp] " + natKey + " >-< " + lConn.LocalAddr().String())
 	r.udpNatMap.Delete(natKey)
 	lConn.Close()
 }

@@ -1,5 +1,5 @@
-//go:build darwin && !ios
-// +build darwin,!ios
+//go:build darwin
+// +build darwin
 
 package inbound
 
@@ -85,6 +85,8 @@ type tunLinkEndpoint struct {
 	tun        io.ReadWriteCloser
 	mtu        int
 	dispatcher stack.NetworkDispatcher
+	writeCh    chan *stack.PacketBuffer
+	writeErrCh chan tcpip.Error
 }
 
 func (ep *tunLinkEndpoint) MTU() uint32 {
@@ -100,30 +102,17 @@ func (ep *tunLinkEndpoint) LinkAddress() tcpip.LinkAddress {
 }
 
 func (ep *tunLinkEndpoint) Capabilities() stack.LinkEndpointCapabilities {
-	return stack.CapabilityNone
+	return stack.CapabilityRXChecksumOffload
 }
 
 func (ep *tunLinkEndpoint) Attach(dispatcher stack.NetworkDispatcher) {
-	ep.dispatcher = dispatcher
-	go func() {
-		buf := global.BufPool.Get(ep.mtu + 4)
-		defer global.BufPool.Put(buf)
-
-		for {
-			n, err := ep.tun.Read(buf)
-			if err != nil {
-				return
-			}
-			if n <= 4 {
-				continue
-			}
-
-			pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-				Data: buffer.NewVectorisedView(n-4, []buffer.View{buffer.NewViewFromBytes(buf[4:])}),
-			})
-			ep.dispatcher.DeliverNetworkPacket("", "", header.IPv4ProtocolNumber, pkt)
-		}
-	}()
+	if dispatcher != nil {
+		ep.dispatcher = dispatcher
+		ep.writeCh = make(chan *stack.PacketBuffer)
+		ep.writeErrCh = make(chan tcpip.Error)
+		go ep.readLoop()
+		go ep.writeLoop()
+	}
 }
 
 func (ep *tunLinkEndpoint) IsAttached() bool {
@@ -137,43 +126,94 @@ func (ep *tunLinkEndpoint) ARPHardwareType() header.ARPHardwareType {
 	return header.ARPHardwareNone
 }
 
-func (ep *tunLinkEndpoint) AddHeader(_, _ tcpip.LinkAddress, _ tcpip.NetworkProtocolNumber, _ *stack.PacketBuffer) {
+func (ep *tunLinkEndpoint) AddHeader(_ *stack.PacketBuffer) {
 }
 
-func (ep *tunLinkEndpoint) WritePacket(_ stack.RouteInfo, _ tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) tcpip.Error {
-	return ep.writePacketInternal(pkt)
-}
-
-func (ep *tunLinkEndpoint) WritePackets(_ stack.RouteInfo, pkts stack.PacketBufferList, _ tcpip.NetworkProtocolNumber) (int, tcpip.Error) {
+func (ep *tunLinkEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
 	n := 0
 	for pkt := pkts.Front(); pkt != nil; pkt = pkt.Next() {
-		if err := ep.writePacketInternal(pkt); err != nil {
-			break
+		ep.writeCh <- pkt
+		if err := <-ep.writeErrCh; err != nil {
+			return n, err
 		}
 		n++
 	}
 	return n, nil
 }
 
-func (ep *tunLinkEndpoint) WriteRawPacket(pkt *stack.PacketBuffer) tcpip.Error {
-	return ep.writePacketInternal(pkt)
-}
-
-func (ep *tunLinkEndpoint) writePacketInternal(pkt *stack.PacketBuffer) tcpip.Error {
-	if pkt.Size() > ep.mtu {
-		return &tcpip.ErrMessageTooLong{}
-	}
-
-	buf := global.BufPool.Get(pkt.Size() + 4)[:4]
+func (ep *tunLinkEndpoint) readLoop() {
+	buf := global.BufPool.Get(ep.mtu + 4)
 	defer global.BufPool.Put(buf)
 
-	buf[3] = unix.AF_INET
-	for _, v := range pkt.Views() {
-		buf = append(buf, v...)
-	}
+	for {
+		n, err := ep.tun.Read(buf)
+		if err != nil {
+			return
+		}
+		if n <= 4 {
+			continue
+		}
 
-	if _, err := ep.tun.Write(buf); err != nil {
-		return &tcpip.ErrInvalidEndpointState{}
+		var protocol tcpip.NetworkProtocolNumber
+		switch buf[3] {
+		case unix.AF_INET:
+			protocol = header.IPv4ProtocolNumber
+		case unix.AF_INET6:
+			protocol = header.IPv6ProtocolNumber
+		default:
+			continue
+		}
+
+		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+			Data: buffer.NewVectorisedView(n-4, []buffer.View{buffer.NewViewFromBytes(buf[4:n])}),
+		})
+		ep.dispatcher.DeliverNetworkPacket(protocol, pkt)
+		pkt.DecRef()
 	}
-	return nil
+}
+
+func (ep *tunLinkEndpoint) writeLoop() {
+	buf := global.BufPool.Get(ep.mtu + 4)
+	defer global.BufPool.Put(buf)
+
+	for {
+		pkt, ok := <-ep.writeCh
+		if !ok {
+			return
+		}
+
+		pktSize := pkt.Size()
+		if pktSize <= 0 {
+			ep.writeErrCh <- nil
+			continue
+		}
+		if pktSize > ep.mtu {
+			ep.writeErrCh <- &tcpip.ErrMessageTooLong{}
+			continue
+		}
+
+		views := pkt.Views()
+		pktBuf := buf[:4]
+		pktBuf[0] = 0
+		pktBuf[1] = 0
+		pktBuf[2] = 0
+		switch views[0][0] >> 4 {
+		case 4:
+			pktBuf[3] = unix.AF_INET
+		case 6:
+			pktBuf[3] = unix.AF_INET6
+		default:
+			ep.writeErrCh <- &tcpip.ErrMalformedHeader{}
+			continue
+		}
+		for _, v := range views {
+			pktBuf = append(pktBuf, v...)
+		}
+
+		if _, err := ep.tun.Write(pktBuf); err != nil {
+			ep.writeErrCh <- &tcpip.ErrInvalidEndpointState{}
+		} else {
+			ep.writeErrCh <- nil
+		}
+	}
 }

@@ -14,12 +14,12 @@ Usage of mut:
         localhost debug port
   -dns string
         dns config, protocol://host:port[/path...]
-  -in string
+  -in string (multiple values supported)
         inbound config, scheme://[username:password@]host:port[/?option=value...]
-  -out string
-        outbound config, scheme://[username:password@]host:port[/?option=value...]
+  -out string (multiple values supported)
+        outbound config, [tag:]scheme://[username:password@]host:port[/?option=value...]
   -rules string
-        router rules, rule1:action1[;rule2:action2...][;final:action]
+        router rules, rule1:tag1[;rule2:tag2...][;final:tag]
   -stdin
         receive other arguments from stdin
 ```
@@ -29,6 +29,8 @@ Usage of mut:
 ### New URL schemes
 
 Starting from 2021.06 release, inbound and outbound configuration URL schemes will use `protocol+transport[+transport...]` format.
+
+Starting from 2022.03 release, each outbound can contain a unique tag for routing.
 
 #### `tls` transport
 
@@ -82,12 +84,13 @@ Receives both HTTP/1.1 and SOCKS5 requests. The underlying protocol is automatic
 
 Options: same as `socks` protocol.
 
-#### `tun` protocol (Linux/macOS)
+#### `tun` protocol
 
 Processes TCP/UDP/ICMP connections from a tun device. `tun` inbound can be initialized using:
 - device name: `tun://tun<number>` (Linux) or `tun://utun<number>` (macOS)
 - file descriptor: `tun://?fd=<fd>` (Linux/macOS)
 - fd received from unix socket: `tun://?fdpath=<socket path>` (Linux/macOS)
+- IP over UDP: `tunudp://host:port` (all platforms)
 
 Options:
 - `mtu`: Override the default mtu (1500) of tun device.
@@ -143,16 +146,17 @@ Mut includes a rule-based router for handling inbound requests. By default, all 
 
 #### Rules format
 
-Routing rules are joined by semicolon (`;`). Each rule is in a format of `condition,action`.
+Routing rules are joined by semicolon (`;`). Each rule is in a format of `condition,tag`.
 
 #### Conditions
 
 - `domains:` condition: matches domain suffixes, following by a file containing domain suffixes, one in a line. Example: `domains:1.txt`
 - `cidr:` condition: matches IPv4 CIDR address ranges, following by a file containing CIDRs, one in a line. Example: `cidr:1.txt`
 
-#### Actions
+#### Tags
 
-- `default`: the connection will be sent through the default outbound.
+- An outbound tag name: the connection will be sent through the specified outbound.
+- `default`: the connection will be sent through the default outbound without tag.
 - `direct`: the connection will be sent directly.
 - `reject`: the connection will be rejected.
 

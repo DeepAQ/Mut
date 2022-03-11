@@ -47,6 +47,10 @@ func (s *socksOutbound) Name() string {
 	return "socks"
 }
 
+func (s *socksOutbound) RemoteDNS() bool {
+	return true
+}
+
 func (s *socksOutbound) DialTcp(targetAddr string) (net.Conn, error) {
 	targetHost, targetPortStr, err := net.SplitHostPort(targetAddr)
 	if err != nil {

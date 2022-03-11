@@ -6,8 +6,8 @@ require (
 	github.com/hashicorp/yamux v0.0.0-20211028200310-0bc27b27de87
 	github.com/lucas-clemente/quic-go v0.25.0
 	golang.org/x/net v0.0.0-20220127200216-cd36cc0744dd
-	golang.org/x/sys v0.0.0-20220128215802-99c3d69c2c27
-	gvisor.dev/gvisor v0.0.0-20211202223905-da01553a212d
+	golang.org/x/sys v0.0.0-20220209214540-3681064d5158
+	gvisor.dev/gvisor v0.0.0-20220210222901-965a9812e960
 )
 
 require (
@@ -22,11 +22,10 @@ require (
 	github.com/nxadm/tail v1.4.8 // indirect
 	github.com/onsi/ginkgo v1.16.4 // indirect
 	golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9 // indirect
-	golang.org/x/mobile v0.0.0-20220112015953-858099ff7816 // indirect
-	golang.org/x/mod v0.4.2 // indirect
+	golang.org/x/mod v0.5.1 // indirect
 	golang.org/x/text v0.3.7 // indirect
 	golang.org/x/time v0.0.0-20191024005414-555d28b269f0 // indirect
-	golang.org/x/tools v0.1.8-0.20211022200916-316ba0b74098 // indirect
+	golang.org/x/tools v0.1.9 // indirect
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
 )

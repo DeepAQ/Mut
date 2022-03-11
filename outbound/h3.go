@@ -47,6 +47,10 @@ func (h *h3Outbound) Name() string {
 	return "h3"
 }
 
+func (h *h3Outbound) RemoteDNS() bool {
+	return true
+}
+
 func (h *h3Outbound) DialTcp(targetAddr string) (net.Conn, error) {
 	pr, pw := io.Pipe()
 	req, err := http.NewRequest(http.MethodConnect, "https://"+h.host, pr)

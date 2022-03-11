@@ -27,8 +27,9 @@ func newTunInboundWithFD(u *url.URL, fd int, tag string) (*tunInbound, error) {
 	}
 
 	l2ep, err := fdbased.New(&fdbased.Options{
-		FDs: []int{fd},
-		MTU: uint32(mtu),
+		FDs:               []int{fd},
+		MTU:               uint32(mtu),
+		RXChecksumOffload: true,
 	})
 	if err != nil {
 		return nil, errors.New("failed to create l2 endpoint: " + err.Error())

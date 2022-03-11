@@ -41,6 +41,10 @@ func (h *httpOutbound) Name() string {
 	return "http"
 }
 
+func (h *httpOutbound) RemoteDNS() bool {
+	return true
+}
+
 func (h *httpOutbound) DialTcp(targetAddr string) (net.Conn, error) {
 	conn, err := h.transport.OpenConnection()
 	if err != nil {

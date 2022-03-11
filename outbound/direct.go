@@ -19,6 +19,10 @@ func (d *directOutbound) Name() string {
 	return "direct"
 }
 
+func (d *directOutbound) RemoteDNS() bool {
+	return false
+}
+
 func (d *directOutbound) DialTcp(targetAddr string) (net.Conn, error) {
 	if d.resolver != nil {
 		host, port, err := net.SplitHostPort(targetAddr)

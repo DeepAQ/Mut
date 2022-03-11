@@ -1,6 +1,3 @@
-//go:build linux || (darwin && !ios)
-// +build linux darwin,!ios
-
 package inbound
 
 import (
@@ -134,8 +131,10 @@ func (t *tunInbound) Serve(r router.Router) error {
 				ReserveHeaderBytes: header.UDPMinimumSize + int(route.MaxHeaderLength()),
 				Data:               buffer.NewVectorisedView(len(data), []buffer.View{data}),
 			})
-			hdr := header.UDP(pkt.TransportHeader().Push(header.UDPMinimumSize))
+			defer pkt.DecRef()
 			pkt.TransportProtocolNumber = udp.ProtocolNumber
+
+			hdr := header.UDP(pkt.TransportHeader().Push(header.UDPMinimumSize))
 			hdr.SetSourcePort(replySrcPort)
 			hdr.SetDestinationPort(id.RemotePort)
 			hdr.SetLength(uint16(pkt.Size()))
