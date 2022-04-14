@@ -12,9 +12,9 @@ import (
 
 type httpOutbound struct {
 	transport transport.TcpOutboundTransport
-	needsAuth bool
 	username  string
 	password  string
+	needsAuth bool
 }
 
 func NewHttpOutbound(u *url.URL, tp transport.OutboundTransport) (*httpOutbound, error) {

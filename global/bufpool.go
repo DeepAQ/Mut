@@ -16,9 +16,9 @@ type BufferPool interface {
 }
 
 type defaultBufPool struct {
+	bufs   []sync.Pool
 	minExp uint8
 	maxExp uint8
-	bufs   []sync.Pool
 }
 
 func NewBufPool(minSize, maxSize uint32) *defaultBufPool {
@@ -31,7 +31,7 @@ func NewBufPool(minSize, maxSize uint32) *defaultBufPool {
 	}
 	for i := range bp.bufs {
 		size := 1 << (minExp + uint8(i))
-		bp.bufs[i].New = func() interface{} {
+		bp.bufs[i].New = func() any {
 			return make([]byte, size)
 		}
 	}

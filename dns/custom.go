@@ -1,12 +1,13 @@
 package dns
 
 import (
-	"encoding/binary"
+	"container/list"
 	"errors"
 	"github.com/DeepAQ/mut/global"
 	"golang.org/x/net/dns/dnsmessage"
 	"math/rand"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,9 +16,9 @@ import (
 )
 
 const (
-	maxTTL       = 3600
-	fakeIpTTL    = 60
-	fakeIpExpire = 5 * time.Minute
+	maxTTL     = 3600
+	fakeIpTTL  = 10
+	fakeIpSize = 100
 )
 
 var (
@@ -26,29 +27,28 @@ var (
 )
 
 type cacheEntry struct {
-	ip     net.IP
+	ip     netip.Addr
 	expire time.Time
 }
 
 type fakeIpEntry struct {
 	host   string
-	expire time.Time
+	fakeIp uint32
 }
 
 type customResolver struct {
-	bufSize int
-	client  Client
-	cache   sync.Map //map[string]cacheEntry
-
-	localAddr string
-	useFakeIp bool
-
-	fakeIpPrefix uint32
-	fakeIpMask   int
-	fakeIpMu     sync.Mutex
-	fakeIpCurr   uint32
-	fakeIpToHost map[uint32]*fakeIpEntry
-	hostToFakeIp map[string]uint32
+	client          Client
+	fakeIpList      *list.List // of fakeIpEntry
+	fakeIpToElement map[uint32]*list.Element
+	hostToFakeIp    map[string]uint32
+	cache           sync.Map // map[string]cacheEntry
+	localAddr       string
+	bufSize         int
+	fakeIpMask      int
+	fakeIpMu        sync.Mutex
+	fakeIpCurr      uint32
+	fakeIpPrefix    uint32
+	useFakeIp       bool
 }
 
 func NewCustomResolver(bufSize int, client Client) *customResolver {
@@ -66,24 +66,13 @@ func (r *customResolver) Start() {
 			select {
 			case <-ticker.C:
 				now := time.Now()
-				r.cache.Range(func(k, v interface{}) bool {
+				r.cache.Range(func(k, v any) bool {
 					ce := v.(cacheEntry)
 					if ce.expire.Before(now) {
 						r.cache.Delete(k)
 					}
 					return true
 				})
-
-				if r.fakeIpPrefix > 0 {
-					r.fakeIpMu.Lock()
-					for k, v := range r.fakeIpToHost {
-						if v.expire.Before(now) {
-							delete(r.fakeIpToHost, k)
-							delete(r.hostToFakeIp, v.host)
-						}
-					}
-					r.fakeIpMu.Unlock()
-				}
 			}
 		}
 	}()
@@ -93,16 +82,17 @@ func (r *customResolver) Start() {
 	}
 }
 
-func (r *customResolver) ResolveFakeIP(ip net.IP) string {
+func (r *customResolver) ResolveFakeIP(ip netip.Addr) string {
 	if r.fakeIpPrefix > 0 {
-		if ip4 := ip.To4(); ip4 != nil {
-			ipInt := binary.BigEndian.Uint32(ip4)
+		if ip.Is4() {
+			ip4 := ip.As4()
+			ipInt := uint32(ip4[3]) | uint32(ip4[2])<<8 | uint32(ip4[1])<<16 | uint32(ip4[0])<<24
 			if ipInt & ^((1<<(32-r.fakeIpMask))-1) == r.fakeIpPrefix {
 				r.fakeIpMu.Lock()
 				defer r.fakeIpMu.Unlock()
-				if v, ok := r.fakeIpToHost[ipInt]; ok {
-					v.expire = time.Now().Add(fakeIpExpire)
-					return v.host
+				if element, ok := r.fakeIpToElement[ipInt]; ok {
+					r.fakeIpList.MoveToBack(element)
+					return element.Value.(fakeIpEntry).host
 				}
 			}
 		}
@@ -110,14 +100,13 @@ func (r *customResolver) ResolveFakeIP(ip net.IP) string {
 	return ""
 }
 
-func (r *customResolver) Lookup(host string) (net.IP, error) {
-	ip := net.ParseIP(host)
-	if ip != nil {
-		ip4 := ip.To4()
-		if ip4 != nil {
-			return ip4, nil
+func (r *customResolver) Lookup(host string) (netip.Addr, error) {
+	ip, _ := netip.ParseAddr(host)
+	if ip.IsValid() {
+		if ip.Is4() {
+			return ip, nil
 		}
-		return nil, errIPv6NotSupported
+		return netip.Addr{}, errIPv6NotSupported
 	}
 
 	if v, ok := r.cache.Load(host); ok {
@@ -131,19 +120,19 @@ func (r *customResolver) Lookup(host string) (net.IP, error) {
 	defer global.BufPool.Put(buf)
 	buf, err := queryToWire(buf, host, dnsmessage.TypeA)
 	if err != nil {
-		return nil, err
+		return netip.Addr{}, err
 	}
 	buf, err = r.client.RoundTrip(buf)
 	if err != nil {
-		return nil, err
+		return netip.Addr{}, err
 	}
 	ips, ttl, err := ipv4ResultFromWire(buf)
 	if err != nil {
-		return nil, err
+		return netip.Addr{}, err
 	}
 
 	if len(ips) == 0 {
-		return nil, errNoResult
+		return netip.Addr{}, errNoResult
 	}
 
 	ip = ips[rand.Intn(len(ips))]
@@ -165,7 +154,7 @@ func (r *customResolver) Debug() string {
 	sb.WriteString("dns cache:\n\n")
 	tw.Write([]byte("[host]\t[ip]\t[ttl]\n"))
 	now := time.Now()
-	r.cache.Range(func(k, v interface{}) bool {
+	r.cache.Range(func(k, v any) bool {
 		ce := v.(cacheEntry)
 		tw.Write([]byte(k.(string) + "\t" + ce.ip.String() + "\t" + strconv.Itoa(int(ce.expire.Sub(now).Seconds())) + "s\n"))
 		return true
@@ -173,16 +162,25 @@ func (r *customResolver) Debug() string {
 	tw.Flush()
 
 	if r.fakeIpPrefix > 0 {
-		sb.WriteString("\nfake ip pool:\n\n")
-		tw.Write([]byte("[ip]\t[host]\t[ttl]\n"))
 		r.fakeIpMu.Lock()
-		for ip, fe := range r.fakeIpToHost {
+		sb.WriteString("\nfake ip list:\n\n")
+		tw.Write([]byte("[ip]\t[host]\n"))
+		for element := r.fakeIpList.Front(); element != nil; element = element.Next() {
+			entry := element.Value.(fakeIpEntry)
+			ip := entry.fakeIp
 			tw.Write([]byte(strconv.Itoa(int(ip>>24)) + "." + strconv.Itoa(int((ip>>16)&0xff)) + "." +
-				strconv.Itoa(int(ip>>8)&0xff) + "." + strconv.Itoa(int(ip&0xff)) + "\t" + fe.host + "\t" +
-				strconv.Itoa(int(fe.expire.Sub(now).Seconds())) + "s\n"))
+				strconv.Itoa(int(ip>>8)&0xff) + "." + strconv.Itoa(int(ip&0xff)) + "\t" + entry.host + "\n"))
 		}
-		r.fakeIpMu.Unlock()
 		tw.Flush()
+
+		sb.WriteString("\nhost -> fake ip:\n\n")
+		tw.Write([]byte("[host]\t[ip]\n"))
+		for host, ip := range r.hostToFakeIp {
+			tw.Write([]byte(host + "\t" + strconv.Itoa(int(ip>>24)) + "." + strconv.Itoa(int((ip>>16)&0xff)) + "." +
+				strconv.Itoa(int(ip>>8)&0xff) + "." + strconv.Itoa(int(ip&0xff)) + "\n"))
+		}
+		tw.Flush()
+		r.fakeIpMu.Unlock()
 	}
 	return sb.String()
 }
@@ -198,7 +196,8 @@ func (r *customResolver) listenLocal() {
 		// temp: use 198.18.0.0/16 as fake ip range
 		r.fakeIpPrefix = 198<<24 + 18<<16
 		r.fakeIpMask = 16
-		r.fakeIpToHost = map[uint32]*fakeIpEntry{}
+		r.fakeIpList = list.New()
+		r.fakeIpToElement = map[uint32]*list.Element{}
 		r.hostToFakeIp = map[string]uint32{}
 	}
 
@@ -239,22 +238,29 @@ func (r *customResolver) listenLocal() {
 							for i := 0; ; i++ {
 								r.fakeIpCurr = (r.fakeIpCurr + 1) % (1 << (32 - r.fakeIpMask))
 								fip = r.fakeIpPrefix + r.fakeIpCurr
-								if _, ok = r.fakeIpToHost[fip]; !ok {
+								if _, ok = r.fakeIpToElement[fip]; !ok {
 									break
 								}
 								if i >= 1<<(32-r.fakeIpMask)-1 {
+									r.fakeIpMu.Unlock()
 									global.Stderr.Println("[dns-local] no available addresses in fake ip pool")
 									resp = writeServFail(reqBuf)
 									goto sendResponse
 								}
 							}
+
 							r.hostToFakeIp[fakeIpHostname] = fip
-							r.fakeIpToHost[fip] = &fakeIpEntry{
+							r.fakeIpToElement[fip] = r.fakeIpList.PushBack(fakeIpEntry{
+								fakeIp: fip,
 								host:   fakeIpHostname,
-								expire: time.Now().Add(fakeIpExpire),
+							})
+							if r.fakeIpList.Len() > fakeIpSize {
+								oldEntry := r.fakeIpList.Remove(r.fakeIpList.Front()).(fakeIpEntry)
+								delete(r.fakeIpToElement, oldEntry.fakeIp)
+								delete(r.hostToFakeIp, oldEntry.host)
 							}
 						} else {
-							r.fakeIpToHost[fip].expire = time.Now().Add(fakeIpExpire)
+							r.fakeIpList.MoveToBack(r.fakeIpToElement[fip])
 						}
 						r.fakeIpMu.Unlock()
 						resp, err = ipv4AnswerToWire(reqHeader, reqQuestion, fip, fakeIpTTL, respBuf)

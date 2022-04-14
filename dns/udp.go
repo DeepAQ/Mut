@@ -19,17 +19,17 @@ var (
 )
 
 type udpRequest struct {
-	buf  []byte
 	resc chan []byte
+	buf  []byte
 }
 
 type udpClient struct {
+	conn    unsafe.Pointer // *net.Conn
+	reqs    sync.Map       // map[uint16]udpRequest
 	server  string
-	conn    unsafe.Pointer //*net.Conn
+	timeout time.Duration
 	connMu  sync.Mutex
 	reqId   uint32
-	reqs    sync.Map //map[uint16]udpRequest
-	timeout time.Duration
 }
 
 func NewUDPClient(server string, timeout time.Duration) *udpClient {

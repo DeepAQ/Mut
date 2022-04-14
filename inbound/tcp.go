@@ -13,9 +13,9 @@ type TcpProtocol interface {
 }
 
 type tcpInboundWrapper struct {
-	name      string
 	protocol  TcpProtocol
 	transport transport.TcpInboundTransport
+	name      string
 }
 
 func NewTcpInbound(u *url.URL, protocol TcpProtocol, tp transport.InboundTransport) (*tcpInboundWrapper, error) {

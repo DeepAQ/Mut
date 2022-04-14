@@ -46,6 +46,9 @@ func CreateInbound(u *url.URL) (Inbound, error) {
 	case "http":
 		return NewTcpInbound(u, NewHttpProtocol(u), tp)
 	case "h3":
+		if tp != nil {
+			return nil, errors.New("h3 protocol cannot be used with custom transport")
+		}
 		return NewH3Inbound(u), nil
 	case "socks", "socks5":
 		return NewTcpInbound(u, NewSocksProtocol(u), tp)
@@ -54,9 +57,15 @@ func CreateInbound(u *url.URL) (Inbound, error) {
 	case "forward":
 		return NewTcpInbound(u, NewForwardProtocol(u), tp)
 	case "tun":
+		if tp != nil {
+			return nil, errors.New("tun protocol cannot be used with custom transport")
+		}
 		return NewTunInbound(u)
-	case "tunudp":
-		return NewTunUdpInbound(u)
+	case "l2tp":
+		if tp != nil {
+			return nil, errors.New("l2tp protocol cannot be used with custom transport")
+		}
+		return NewL2TPInbound(u), nil
 	default:
 		return nil, errors.New("unsupported inbound protocol " + protocol)
 	}

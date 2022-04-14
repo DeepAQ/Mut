@@ -43,9 +43,9 @@ func (m *multipleStringFlag) Set(s string) error {
 }
 
 type instance struct {
-	inbounds  []inbound.Inbound
 	router    router.Router
 	resolver  dns.Resolver
+	inbounds  []inbound.Inbound
 	debugPort int
 }
 
@@ -64,8 +64,8 @@ func newInstance(args []string) (*instance, error) {
 		debugPort: *debugFlag,
 	}
 
-	for i, inFlag := range inFlags {
-		inUrl, err := url.Parse(inFlag)
+	for i := range inFlags {
+		inUrl, err := url.Parse(inFlags[i])
 		if err != nil {
 			return nil, errors.New("failed to parse inbound config: " + err.Error())
 		}

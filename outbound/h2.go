@@ -18,16 +18,15 @@ import (
 )
 
 type h2Outbound struct {
-	transport transport.TcpOutboundTransport
-	host      string
-	needsAuth bool
-	username  string
-	password  string
-	aliveTime time.Duration
-
+	transport    transport.TcpOutboundTransport
+	host         string
+	username     string
+	password     string
+	tDeadline    []time.Time
 	h2Transports []*http2.Transport
 	tMutex       []sync.Mutex
-	tDeadline    []time.Time
+	aliveTime    time.Duration
+	needsAuth    bool
 }
 
 const (

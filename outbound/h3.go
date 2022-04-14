@@ -13,11 +13,11 @@ import (
 )
 
 type h3Outbound struct {
+	transport *http3.RoundTripper
 	host      string
-	needsAuth bool
 	username  string
 	password  string
-	transport *http3.RoundTripper
+	needsAuth bool
 }
 
 func NewHttp3Outbound(u *url.URL) (*h3Outbound, error) {

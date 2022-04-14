@@ -19,9 +19,9 @@ var (
 
 type socksOutbound struct {
 	transport transport.TcpOutboundTransport
-	needsAuth bool
 	username  string
 	password  string
+	needsAuth bool
 }
 
 func NewSocksOutbound(u *url.URL, tp transport.OutboundTransport) (*socksOutbound, error) {

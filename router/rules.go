@@ -3,13 +3,14 @@ package router
 import (
 	"encoding/binary"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 )
 
 type Rule interface {
 	NeedsIP() bool
-	Matches(host string, ip net.IP) bool
+	Matches(host string, ip netip.Addr) bool
 }
 
 type domainRule struct {
@@ -30,7 +31,7 @@ func (r *domainRule) NeedsIP() bool {
 	return false
 }
 
-func (r *domainRule) Matches(host string, _ net.IP) bool {
+func (r *domainRule) Matches(host string, _ netip.Addr) bool {
 	i := len(host)
 	for {
 		i = strings.LastIndexByte(host[:i], '.')
@@ -81,9 +82,10 @@ func (r *cidrRule) NeedsIP() bool {
 	return true
 }
 
-func (r *cidrRule) Matches(_ string, ip net.IP) bool {
-	if ip4 := ip.To4(); ip4 != nil {
-		ipInt := binary.BigEndian.Uint32(ip4)
+func (r *cidrRule) Matches(_ string, ip netip.Addr) bool {
+	if ip.Is4() {
+		ip4 := ip.As4()
+		ipInt := uint32(ip4[3]) | uint32(ip4[2])<<8 | uint32(ip4[1])<<16 | uint32(ip4[0])<<24
 		for i := r.minPrefix; i <= r.maxPrefix; i++ {
 			if _, ok := r.cidrs[uint64(ipInt>>(32-i))<<(64-i)+uint64(i)]; ok {
 				return true
@@ -92,15 +94,3 @@ func (r *cidrRule) Matches(_ string, ip net.IP) bool {
 	}
 	return false
 }
-
-//type PortRule struct {
-//	port uint16
-//}
-//
-//func (r *PortRule) NeedsIP() bool {
-//	return false
-//}
-//
-//func (r *PortRule) Matches(host string, ip net.IP, port uint16) bool {
-//	return r.port == port
-//}

@@ -9,8 +9,8 @@ import (
 )
 
 type dohClient struct {
-	url    string
 	client *http.Client
+	url    string
 }
 
 func NewDoHClient(server string, timeout time.Duration) *dohClient {

@@ -2,6 +2,7 @@ package dns
 
 import (
 	"net"
+	"net/netip"
 )
 
 type systemResolver struct {
@@ -12,16 +13,18 @@ var System = systemResolver{}
 func (systemResolver) Start() {
 }
 
-func (systemResolver) ResolveFakeIP(net.IP) string {
+func (systemResolver) ResolveFakeIP(netip.Addr) string {
 	return ""
 }
 
-func (systemResolver) Lookup(host string) (net.IP, error) {
+func (systemResolver) Lookup(host string) (netip.Addr, error) {
 	ipAddr, err := net.ResolveIPAddr("ip4", host)
 	if err != nil {
-		return nil, err
+		return netip.Addr{}, err
 	}
-	return ipAddr.IP, nil
+
+	ip, _ := netip.AddrFromSlice(ipAddr.IP)
+	return ip, nil
 }
 
 func (systemResolver) Debug() string {

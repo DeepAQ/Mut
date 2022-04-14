@@ -1,5 +1,4 @@
 //go:build ios
-// +build ios
 
 package global
 
@@ -12,11 +11,11 @@ package global
 #include <Security/Security.h>
 
 void printLog(_GoString_ str) {
-	os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_INFO, "%{public}.*s", str.n, str.p);
+	os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_INFO, "%{public}.*s", (int) str.n, str.p);
 }
 
 void printErrorLog(_GoString_ str) {
-	os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_ERROR, "%{public}.*s", str.n, str.p);
+	os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_ERROR, "%{public}.*s", (int) str.n, str.p);
 }
 
 int verifyTrust(_GoString_ hostname, _GoString_ cert) {

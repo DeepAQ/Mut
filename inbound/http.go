@@ -19,14 +19,14 @@ import (
 )
 
 type httpProtocol struct {
-	httpsMode bool
-	needsAuth bool
-	username  string
-	password  string
-	initOnce  sync.Once
 	router    router.Router
 	server    *http.Server
 	transport *http.Transport
+	username  string
+	password  string
+	initOnce  sync.Once
+	httpsMode bool
+	needsAuth bool
 }
 
 func NewHttpProtocol(u *url.URL) *httpProtocol {
@@ -142,8 +142,8 @@ func (h *httpProtocol) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 			return
 		}
 		for k, vs := range result.Header {
-			for _, v := range vs {
-				resp.Header().Add(k, v)
+			for i := range vs {
+				resp.Header().Add(k, vs[i])
 			}
 		}
 

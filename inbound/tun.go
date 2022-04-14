@@ -49,11 +49,21 @@ func (t *tunInbound) Name() string {
 }
 
 func (t *tunInbound) Serve(r router.Router) error {
+	s, err := createTunStack("tun", t.l2ep, r, t.dnsgw)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+
+	global.Stdout.Println("[tun] listening on " + t.tag)
+	select {}
+}
+
+func createTunStack(name string, ep stack.LinkEndpoint, r router.Router, dnsgw string) (*stack.Stack, error) {
 	s := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4},
 	})
-	defer s.Close()
 
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcp.NewForwarder(s, 0, 100, func(req *tcp.ForwarderRequest) {
 		id := req.ID()
@@ -74,7 +84,7 @@ func (t *tunInbound) Serve(r router.Router) error {
 
 		conn := gonet.NewTCPConn(&wq, ep)
 		req.Complete(false)
-		r.HandleTcpStream("tun", conn, clientAddr, targetAddr)
+		r.HandleTcpStream(name, conn, clientAddr, targetAddr)
 	}).HandlePacket)
 
 	s.SetTransportProtocolHandler(udp.ProtocolNumber, func(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
@@ -99,13 +109,13 @@ func (t *tunInbound) Serve(r router.Router) error {
 		s.Stats().UDP.PacketsReceived.Increment()
 
 		isDns := false
-		if len(t.dnsgw) > 0 && id.LocalPort == 53 {
+		if len(dnsgw) > 0 && id.LocalPort == 53 {
 			isDns = true
 			clientAddr = "dns-" + clientAddr + "-" + targetAddr
-			targetAddr = t.dnsgw
+			targetAddr = dnsgw
 		}
 		vv := data.ExtractVV()
-		r.SendUdpPacket("tun", clientAddr, targetAddr, vv.ToView(), func(remoteAddr net.Addr, data []byte) {
+		r.SendUdpPacket(name, clientAddr, targetAddr, vv.ToView(), func(remoteAddr net.Addr, data []byte) {
 			var replySrcAddr tcpip.Address
 			var replySrcPort uint16
 			if isDns {
@@ -153,21 +163,19 @@ func (t *tunInbound) Serve(r router.Router) error {
 		return true
 	})
 
-	if serr := s.CreateNIC(defaultNICID, t.l2ep); serr != nil {
-		return errors.New("failed to create nic: " + serr.String())
+	if serr := s.CreateNIC(defaultNICID, ep); serr != nil {
+		return nil, errors.New("failed to create nic: " + serr.String())
 	}
 	if serr := s.SetPromiscuousMode(defaultNICID, true); serr != nil {
-		return errors.New("failed to enable promiscuous mode: " + serr.String())
+		return nil, errors.New("failed to enable promiscuous mode: " + serr.String())
 	}
 	if serr := s.SetSpoofing(defaultNICID, true); serr != nil {
-		return errors.New("failed to enable address spoofing: " + serr.String())
+		return nil, errors.New("failed to enable address spoofing: " + serr.String())
 	}
 	s.SetRouteTable([]tcpip.Route{
 		{Destination: header.IPv4EmptySubnet, NIC: defaultNICID},
 	})
-
-	global.Stdout.Println("[tun] listening on " + t.tag)
-	select {}
+	return s, nil
 }
 
 func tunAddrToString(addr tcpip.Address, port uint16) string {

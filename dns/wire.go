@@ -3,7 +3,7 @@ package dns
 import (
 	"errors"
 	"golang.org/x/net/dns/dnsmessage"
-	"net"
+	"net/netip"
 )
 
 func queryToWire(buf []byte, host string, questionType dnsmessage.Type) ([]byte, error) {
@@ -33,7 +33,7 @@ func queryToWire(buf []byte, host string, questionType dnsmessage.Type) ([]byte,
 	return builder.Finish()
 }
 
-func ipv4ResultFromWire(buf []byte) ([]net.IP, int, error) {
+func ipv4ResultFromWire(buf []byte) ([]netip.Addr, int, error) {
 	parser := dnsmessage.Parser{}
 	header, err := parser.Start(buf)
 	if err != nil {
@@ -43,7 +43,7 @@ func ipv4ResultFromWire(buf []byte) ([]net.IP, int, error) {
 		return nil, 0, errors.New("dns query failed: " + header.RCode.String())
 	}
 
-	var ips []net.IP
+	var ips []netip.Addr
 	var ttl uint32
 	if err := parser.SkipAllQuestions(); err != nil {
 		return nil, 0, err
@@ -66,7 +66,7 @@ func ipv4ResultFromWire(buf []byte) ([]net.IP, int, error) {
 		if err != nil {
 			return nil, 0, err
 		}
-		ips = append(ips, ar.A[:])
+		ips = append(ips, netip.AddrFrom4(ar.A))
 		if ttl == 0 || ah.TTL < ttl {
 			ttl = ah.TTL
 		}

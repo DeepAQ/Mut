@@ -62,9 +62,9 @@ func (m *mixProtocol) serveConn(conn net.Conn, r router.Router) error {
 }
 
 type mixConn struct {
+	conn net.Conn
+	buf  []byte
 	sync.Mutex
-	conn      net.Conn
-	buf       []byte
 	bufOffset uint32
 	bufLimit  uint32
 }

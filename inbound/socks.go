@@ -21,12 +21,12 @@ var (
 
 type socksProtocol struct {
 	router     router.Router
+	udpConn    net.PacketConn
 	addr       string
-	needsAuth  bool
 	username   string
 	password   string
+	needsAuth  bool
 	udpEnabled bool
-	udpConn    net.PacketConn
 }
 
 func NewSocksProtocol(u *url.URL) *socksProtocol {

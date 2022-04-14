@@ -10,16 +10,16 @@ Mut is licensed under the [AGPLv3](LICENSE) license.
 
 ```
 Usage of mut:
-  -debug int
-        localhost debug port
-  -dns string
-        dns config, protocol://host:port[/path...]
   -in string (multiple values supported)
         inbound config, scheme://[username:password@]host:port[/?option=value...]
   -out string (multiple values supported)
         outbound config, [tag:]scheme://[username:password@]host:port[/?option=value...]
   -rules string
         router rules, rule1:tag1[;rule2:tag2...][;final:tag]
+  -dns string
+        dns config, protocol://host:port[/path...]
+  -debug int
+        localhost debug port
   -stdin
         receive other arguments from stdin
 ```
@@ -90,10 +90,17 @@ Processes TCP/UDP/ICMP connections from a tun device. `tun` inbound can be initi
 - device name: `tun://tun<number>` (Linux) or `tun://utun<number>` (macOS)
 - file descriptor: `tun://?fd=<fd>` (Linux/macOS)
 - fd received from unix socket: `tun://?fdpath=<socket path>` (Linux/macOS)
-- IP over UDP: `tunudp://host:port` (all platforms)
 
 Options:
-- `mtu`: Override the default mtu (1500) of tun device.
+- `mtu` (optional): Override the default mtu (1500) of tun device.
+- `dnsgw` (optional): Forward all DNS requests to a specified server.
+
+#### `l2tp` protocol
+
+Accepts L2TP (without IPSec) connections on port 1701. Client compatibility is limited to RouterOS and Linux (xl2tpd).
+
+Options:
+- `dnsgw`: Forward all DNS requests to a specified server.
 
 ### Outbound protocols
 

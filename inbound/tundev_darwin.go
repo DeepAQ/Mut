@@ -1,5 +1,4 @@
 //go:build darwin
-// +build darwin
 
 package inbound
 
@@ -206,8 +205,8 @@ func (ep *tunLinkEndpoint) writeLoop() {
 			ep.writeErrCh <- &tcpip.ErrMalformedHeader{}
 			continue
 		}
-		for _, v := range views {
-			pktBuf = append(pktBuf, v...)
+		for i := range views {
+			pktBuf = append(pktBuf, views[i]...)
 		}
 
 		if _, err := ep.tun.Write(pktBuf); err != nil {

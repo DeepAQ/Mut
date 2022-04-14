@@ -2,7 +2,7 @@ package dns
 
 import (
 	"errors"
-	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"time"
@@ -15,8 +15,8 @@ const (
 
 type Resolver interface {
 	Start()
-	ResolveFakeIP(ip net.IP) string
-	Lookup(host string) (net.IP, error)
+	ResolveFakeIP(ip netip.Addr) string
+	Lookup(host string) (netip.Addr, error)
 	Debug() string
 }
 

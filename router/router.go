@@ -6,6 +6,7 @@ import (
 	"github.com/DeepAQ/mut/global"
 	"github.com/DeepAQ/mut/outbound"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -33,11 +34,11 @@ type routerRule struct {
 }
 
 type router struct {
-	outbounds map[string]outbound.Outbound
-	ruleSet   []*routerRule
-	finalOut  string
 	resolver  dns.Resolver
-	udpNatMap sync.Map //map[string]net.PacketConn
+	outbounds map[string]outbound.Outbound
+	udpNatMap sync.Map // map[string]net.PacketConn
+	finalOut  string
+	ruleSet   []*routerRule
 }
 
 func NewRouter(conf string, resolver dns.Resolver, outbounds map[string]outbound.Outbound) (*router, error) {
@@ -100,7 +101,7 @@ func NewRouter(conf string, resolver dns.Resolver, outbounds map[string]outbound
 func (r *router) DialTcp(targetAddr string) (conn net.Conn, err error, outTag, realAddr string) {
 	host, port, ip := r.resolveRealAddr(targetAddr)
 	realAddr = host + ":" + port
-	resolved := ip != nil
+	resolved := ip.IsValid()
 
 	outTag = r.finalOut
 	for _, rs := range r.ruleSet {
@@ -111,7 +112,7 @@ func (r *router) DialTcp(targetAddr string) (conn net.Conn, err error, outTag, r
 					global.Stderr.Println("[router] failed to resolve " + host + ": " + err.Error())
 				}
 			}
-			if ip == nil {
+			if !ip.IsValid() {
 				continue
 			}
 		}
@@ -126,7 +127,7 @@ func (r *router) DialTcp(targetAddr string) (conn net.Conn, err error, outTag, r
 		err = errRejected
 	default:
 		out := r.outbounds[outTag]
-		if ip != nil && !out.RemoteDNS() {
+		if ip.IsValid() && !out.RemoteDNS() {
 			conn, err = out.DialTcp(ip.String() + ":" + port)
 		} else {
 			conn, err = out.DialTcp(realAddr)
@@ -159,7 +160,7 @@ func (r *router) HandleTcpStream(protocolName string, conn net.Conn, clientAddr,
 
 func (r *router) SendUdpPacket(protocolName, natKey, targetAddr string, data []byte, receiver UdpPacketReceiver) {
 	host, port, ip := r.resolveRealAddr(targetAddr)
-	if ip == nil {
+	if !ip.IsValid() {
 		var err error
 		if ip, err = r.resolver.Lookup(host); err != nil {
 			global.Stderr.Println("[" + protocolName + "-udp] failed to resolve host: " + err.Error())
@@ -172,7 +173,7 @@ func (r *router) SendUdpPacket(protocolName, natKey, targetAddr string, data []b
 		return
 	}
 	dAddr := &net.UDPAddr{
-		IP:   ip,
+		IP:   ip.AsSlice(),
 		Port: portInt,
 		Zone: "",
 	}
@@ -216,17 +217,17 @@ func (r *router) udpReadLoop(protocolName, natKey string, lConn net.PacketConn, 
 	lConn.Close()
 }
 
-func (r *router) resolveRealAddr(targetAddr string) (host, port string, ip net.IP) {
+func (r *router) resolveRealAddr(targetAddr string) (host, port string, ip netip.Addr) {
 	host, port, err := net.SplitHostPort(targetAddr)
 	if err != nil {
 		return
 	}
-	ip = net.ParseIP(host)
-	if ip != nil {
+	ip, _ = netip.ParseAddr(host)
+	if ip.IsValid() {
 		realHost := r.resolver.ResolveFakeIP(ip)
 		if len(realHost) > 0 {
 			host = realHost
-			ip = nil
+			ip = netip.Addr{}
 		}
 	}
 	return
